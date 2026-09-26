@@ -37,6 +37,10 @@ class handler(BaseHTTPRequestHandler):
             self._reply(400, {"ok": False, "error": "invalid json"})
             return
 
+        if not serverless.claim_telegram_update(update.get("update_id")):
+            self._reply(200, {"ok": True, "duplicate": True})
+            return
+
         msg = update.get("message") or update.get("edited_message") or {}
         text = (msg.get("text") or "").strip()
         chat = msg.get("chat") or {}
