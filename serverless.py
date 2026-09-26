@@ -28,6 +28,10 @@ STATE_KEY = "sol-meme:alert-state"
 CHAT_KEY = "sol-meme:chat-id"
 STATS_KEY = "sol-meme:last-stats"
 LOCK_KEY = "sol-meme:scan-lock"
+PERFORMANCE_KEY = "sol-meme:performance"
+PERFORMANCE_REFRESH_KEY = "sol-meme:performance:last-refresh"
+PERFORMANCE_REFRESH_SECONDS = max(120, int(os.getenv("PERFORMANCE_REFRESH_SECONDS", "300")))
+REPORT_TZ_OFFSET_HOURS = int(os.getenv("REPORT_TZ_OFFSET_HOURS", "1"))
 
 
 def has_redis() -> bool:
@@ -230,6 +234,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             continue
 
         tg.send(bot.format_alert(token), image=token.image or None)
+        track_alert(token, now)
         state[token.mint] = now
         stats["alerted"] += 1
         time.sleep(0.2)
@@ -254,6 +259,8 @@ def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
 
     try:
         tg = bot.Telegram(bot.TELEGRAM_BOT_TOKEN, chat_id)
+        refresh_performance()
+        send_due_daily_reports(tg)
         state = load_alert_state()
         return scan_once(tg, state)
     finally:
@@ -333,3 +340,180 @@ def claim_telegram_update(update_id: Any, ttl_seconds: int = 86400) -> bool:
     except Exception as exc:
         bot.log.warning("Telegram update dedupe failed: %s", exc)
         return True
+
+
+def _local_dt(ts: float | None = None):
+    from datetime import datetime, timezone, timedelta
+    tz = timezone(timedelta(hours=REPORT_TZ_OFFSET_HOURS))
+    return datetime.fromtimestamp(ts or time.time(), tz=tz)
+
+
+def local_day_key(ts: float | None = None) -> str:
+    return _local_dt(ts).strftime("%Y-%m-%d")
+
+
+def load_performance() -> dict[str, Any]:
+    data = load_json(PERFORMANCE_KEY, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_performance(data: dict[str, Any]) -> bool:
+    return save_json(PERFORMANCE_KEY, data, ttl_seconds=86400 * 45)
+
+
+def track_alert(token: bot.Token, alerted_at: float | None = None) -> None:
+    if not has_redis():
+        return
+    alerted_at = float(alerted_at or time.time())
+    day = local_day_key(alerted_at)
+    data = load_performance()
+    days = data.setdefault("days", {})
+    bucket = days.setdefault(day, {"reported": False, "alerts": {}})
+    alerts = bucket.setdefault("alerts", {})
+    if token.mint in alerts:
+        return
+
+    entry_mcap = float(token.usd_mcap or 0)
+    entry_price = float(token.price_usd or 0)
+    alerts[token.mint] = {
+        "mint": token.mint,
+        "symbol": token.symbol or "?",
+        "name": token.name or token.symbol or "?",
+        "alerted_at": int(alerted_at),
+        "entry_mcap": entry_mcap,
+        "entry_price": entry_price,
+        "peak_mcap": entry_mcap,
+        "peak_price": entry_price,
+        "peak_multiple": 1.0,
+        "last_mcap": entry_mcap,
+        "last_price": entry_price,
+        "last_checked_at": int(alerted_at),
+    }
+    save_performance(data)
+
+
+def _record_multiple(rec: dict[str, Any], current_mcap: float, current_price: float) -> float:
+    entry_price = float(rec.get("entry_price") or 0)
+    entry_mcap = float(rec.get("entry_mcap") or 0)
+    multiple = 0.0
+    if entry_price > 0 and current_price > 0:
+        multiple = current_price / entry_price
+    elif entry_mcap > 0 and current_mcap > 0:
+        multiple = current_mcap / entry_mcap
+    return multiple
+
+
+def refresh_performance(force: bool = False) -> dict[str, int]:
+    stats = {"tracked": 0, "checked": 0, "two_x": 0}
+    if not has_redis():
+        return stats
+
+    now = time.time()
+    if not force:
+        try:
+            last = float(redis_command("GET", PERFORMANCE_REFRESH_KEY) or 0)
+            if now - last < PERFORMANCE_REFRESH_SECONDS:
+                data = load_performance()
+                today = ((data.get("days") or {}).get(local_day_key()) or {}).get("alerts") or {}
+                stats["tracked"] = len(today)
+                stats["two_x"] = sum(1 for r in today.values() if float(r.get("peak_multiple") or 0) >= 2)
+                return stats
+        except Exception:
+            pass
+
+    data = load_performance()
+    today_bucket = ((data.get("days") or {}).get(local_day_key()) or {})
+    alerts = today_bucket.get("alerts") or {}
+    stats["tracked"] = len(alerts)
+
+    for mint, rec in list(alerts.items()):
+        try:
+            probe = bot.Token(
+                mint=mint,
+                name=str(rec.get("name") or "?"),
+                symbol=str(rec.get("symbol") or "?"),
+                source="performance",
+            )
+            bot.dexscreener_enrich(probe)
+            current_mcap = float(probe.usd_mcap or 0)
+            current_price = float(probe.price_usd or 0)
+            if current_mcap <= 0 and current_price <= 0:
+                continue
+            rec["last_mcap"] = current_mcap
+            rec["last_price"] = current_price
+            rec["last_checked_at"] = int(now)
+            rec["peak_mcap"] = max(float(rec.get("peak_mcap") or 0), current_mcap)
+            rec["peak_price"] = max(float(rec.get("peak_price") or 0), current_price)
+            multiple = _record_multiple(rec, current_mcap, current_price)
+            rec["peak_multiple"] = max(float(rec.get("peak_multiple") or 1), multiple or 0)
+            stats["checked"] += 1
+        except Exception as exc:
+            bot.log.debug("performance refresh failed for %s: %s", mint, exc)
+
+    stats["two_x"] = sum(1 for r in alerts.values() if float(r.get("peak_multiple") or 0) >= 2)
+    save_performance(data)
+    try:
+        redis_command("SET", PERFORMANCE_REFRESH_KEY, str(int(now)), "EX", 86400)
+    except Exception:
+        pass
+    return stats
+
+
+def format_performance_report(day: str, *, interim: bool = False) -> str:
+    data = load_performance()
+    bucket = ((data.get("days") or {}).get(day) or {})
+    alerts = list((bucket.get("alerts") or {}).values())
+    alerts.sort(key=lambda r: float(r.get("peak_multiple") or 0), reverse=True)
+    winners = [r for r in alerts if float(r.get("peak_multiple") or 0) >= 2]
+
+    title = "📈 PULSE Performance — today" if interim else f"🏁 PULSE Daily Results — {day}"
+    lines = [
+        title,
+        f"Alerts tracked: <b>{len(alerts)}</b>",
+        f"Reached 2x+: <b>{len(winners)}</b>",
+    ]
+    if not winners:
+        lines.append("No tracked alert reached 2x yet." if interim else "No tracked alert reached 2x during the day.")
+        return "\n".join(lines)
+
+    lines.append("")
+    for i, rec in enumerate(winners[:20], start=1):
+        mult = float(rec.get("peak_multiple") or 0)
+        entry = float(rec.get("entry_mcap") or 0)
+        peak = float(rec.get("peak_mcap") or 0)
+        symbol = str(rec.get("symbol") or "?")
+        mint = str(rec.get("mint") or "")
+        if entry > 0 and peak > 0:
+            move = f"{bot.fmt_usd(entry)} → {bot.fmt_usd(peak)}"
+        else:
+            move = "price-tracked"
+        lines.append(
+            f"{i}. <b>{symbol}</b> — <b>{mult:.2f}x</b> peak · {move}\n"
+            f'<a href="https://dexscreener.com/solana/{mint}">DexScreener</a>'
+        )
+    return "\n".join(lines)
+
+
+def send_due_daily_reports(tg: bot.Telegram) -> int:
+    if not has_redis():
+        return 0
+    data = load_performance()
+    days = data.get("days") or {}
+    today = local_day_key()
+    sent = 0
+    for day in sorted(days):
+        bucket = days.get(day) or {}
+        if day >= today or bucket.get("reported"):
+            continue
+        tg.send(format_performance_report(day))
+        bucket["reported"] = True
+        bucket["reported_at"] = int(time.time())
+        sent += 1
+    if sent:
+        save_performance(data)
+    return sent
+
+
+def today_performance_text() -> str:
+    refresh_performance(force=True)
+    return format_performance_report(local_day_key(), interim=True)
