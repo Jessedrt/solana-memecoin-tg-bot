@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/scan.py": { "maxDuration": 300 },
+    "api/telegram.py": { "maxDuration": 300 },
+    "api/setup.py": { "maxDuration": 30 },
+    "api/health.py": { "maxDuration": 15 }
+  }
+}
