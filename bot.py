@@ -105,11 +105,12 @@ class Telegram:
         self.base = f"https://api.telegram.org/bot{token}"
         self.offset = 0
 
-    def send(self, text: str, chat_id: str | None = None, image: str | None = None) -> None:
+    def send(self, text: str, chat_id: str | None = None, image: str | None = None) -> int | None:
+        """Send a Telegram message and return Telegram's message timestamp on success."""
         cid = chat_id or self.chat_id
         if not cid:
             log.warning("No chat id yet. Open the bot and send /start")
-            return
+            return None
         try:
             if image:
                 r = requests.post(
@@ -118,7 +119,8 @@ class Telegram:
                     timeout=20,
                 )
                 if r.ok:
-                    return
+                    payload = r.json()
+                    return int(((payload.get("result") or {}).get("date")) or time.time())
             r = requests.post(
                 f"{self.base}/sendMessage",
                 json={
@@ -129,10 +131,13 @@ class Telegram:
                 },
                 timeout=20,
             )
-            if not r.ok:
-                log.warning("Telegram send status %s %s", r.status_code, r.text[:200])
+            if r.ok:
+                payload = r.json()
+                return int(((payload.get("result") or {}).get("date")) or time.time())
+            log.warning("Telegram send status %s %s", r.status_code, r.text[:200])
         except Exception as exc:
             log.error("Telegram send failed: %s", exc)
+        return None
 
     def poll_commands(self) -> list[dict[str, Any]]:
         try:
