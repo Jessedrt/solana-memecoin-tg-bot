@@ -1,24 +1,72 @@
 # Solana Memecoin Telegram Scanner
 
-Self-hosted Telegram bot that watches Pump.fun, RugCheck, and DexScreener for Solana memecoins with early traction and DMs you alerts.
+Telegram scanner for early Solana memecoin traction using Pump.fun, RugCheck and DexScreener.
 
-This is a scanner, not an auto-buyer. Most memecoins go to zero.
+This is a **scanner/alert bot, not an auto-buyer**.
 
-## Setup
+## Vercel architecture
 
-1. Message @BotFather on Telegram, send /newbot, copy the token.
-2. Message your bot /start. Get your chat id from @userinfobot.
-3. Install and run:
+The original bot used a permanent `while True` loop and Telegram `getUpdates`. That works on a VPS, but not reliably on Vercel.
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# edit .env with TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
-python bot.py
+This repo now uses:
+
+- `api/telegram.py` — Telegram webhook
+- `api/scan.py` — one bounded scanner invocation
+- `api/setup.py` — one-time Telegram webhook + QStash schedule setup
+- `api/health.py` — deployment/config health
+- `serverless.py` — Upstash Redis state, scan locking and QStash helpers
+- `bot.py` — existing discovery/scoring engine and optional local runner
+
+## Required Vercel environment variables
+
+```
+TELEGRAM_BOT_TOKEN
+TELEGRAM_WEBHOOK_SECRET
+SCANNER_SECRET
+SETUP_SECRET
+UPSTASH_REDIS_REST_URL
+UPSTASH_REDIS_REST_TOKEN
+QSTASH_TOKEN
 ```
 
-Commands: /start /scan /status /help
+`TELEGRAM_CHAT_ID` is optional. If empty, `/start` stores the chat ID in Redis.
 
-Raise MIN_SCORE to 70 for fewer, stronger alerts.
-Never put a wallet private key in this project.
+## Deploy
+
+1. Import this GitHub repo into Vercel.
+2. Add the variables in `.env.example`.
+3. Attach Upstash Redis and Upstash QStash.
+4. Redeploy.
+5. Open:
+
+```
+https://YOUR-PROJECT.vercel.app/api/setup?key=YOUR_SETUP_SECRET
+```
+
+6. In Telegram send:
+
+```
+/start
+/status
+/scan
+```
+
+Health route:
+
+```
+https://YOUR-PROJECT.vercel.app/api/health
+```
+
+## Defaults
+
+- age ≤ 90 minutes
+- market cap $4k–$350k
+- min Pump.fun replies 2
+- min score 55
+- duplicate alert cooldown 180 minutes
+- scheduled scan every 2 minutes
+- max enriched candidates per run 10
+
+## Security
+
+Never commit bot tokens, Redis tokens, QStash tokens, wallet seed phrases or private keys.
