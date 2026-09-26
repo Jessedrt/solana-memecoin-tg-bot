@@ -1,6 +1,6 @@
 # Solana Memecoin Telegram Scanner
 
-Telegram scanner for early Solana memecoin traction using Pump.fun, RugCheck and DexScreener.
+Telegram scanner for early Solana memecoin traction using GeckoTerminal new-pool discovery, RugCheck risk data, and DexScreener market enrichment.
 
 This is a **scanner/alert bot, not an auto-buyer**.
 
@@ -66,6 +66,7 @@ https://YOUR-PROJECT.vercel.app/api/health
 - duplicate alert cooldown 180 minutes
 - scheduled scan every 2 minutes
 - max enriched candidates per run 10
+- GeckoTerminal new-pool pages per run 2
 
 ## Security
 
