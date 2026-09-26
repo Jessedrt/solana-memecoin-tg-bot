@@ -280,3 +280,43 @@ def trigger_qstash_scan() -> bool:
     )
     r.raise_for_status()
     return True
+
+
+def ensure_qstash_schedule() -> dict[str, Any]:
+    """Create or update the recurring QStash scan schedule."""
+    base = production_base_url()
+    if not QSTASH_TOKEN:
+        return {"configured": False, "reason": "QSTASH_TOKEN missing"}
+    if not has_redis():
+        return {"configured": False, "reason": "Redis missing"}
+    if not SCANNER_SECRET:
+        return {"configured": False, "reason": "SCANNER_SECRET missing"}
+    if not base:
+        return {"configured": False, "reason": "Production URL unavailable"}
+
+    destination = f"{base}/api/scan"
+    schedule_id = os.getenv("QSTASH_SCHEDULE_ID", "solana-memecoin-scanner").strip()
+    url = f"https://qstash.upstash.io/v2/schedules/{quote(destination, safe='')}"
+    r = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {QSTASH_TOKEN}",
+            "Content-Type": "application/json",
+            "Upstash-Cron": SCAN_CRON,
+            "Upstash-Schedule-Id": schedule_id,
+            "Upstash-Method": "POST",
+            "Upstash-Retries": "1",
+            "Upstash-Timeout": "120s",
+            "Upstash-Forward-X-Scanner-Secret": SCANNER_SECRET,
+        },
+        json={"source": "qstash-schedule"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return {
+        "configured": True,
+        "schedule_id": data.get("scheduleId") or schedule_id,
+        "cron": SCAN_CRON,
+        "destination": destination,
+    }
