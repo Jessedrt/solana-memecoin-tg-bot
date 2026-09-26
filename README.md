@@ -71,3 +71,5 @@ https://YOUR-PROJECT.vercel.app/api/health
 ## Security
 
 Never commit bot tokens, Redis tokens, QStash tokens, wallet seed phrases or private keys.
+
+<!-- vercel-deploy-trigger -->
