@@ -125,7 +125,7 @@ class Telegram:
                     "chat_id": cid,
                     "text": text,
                     "parse_mode": "HTML",
-                    "disable_web_page_preview": False,
+                    "disable_web_page_preview": True,
                 },
                 timeout=20,
             )
@@ -455,42 +455,30 @@ def fmt_usd(n: float) -> str:
 
 def format_alert(t: Token) -> str:
     age = f"{t.age_min:.0f}m" if t.age_min < 120 else f"{t.age_min/60:.1f}h"
-    links = [
-        f'<a href="https://pump.fun/{t.mint}">Pump</a>',
-        f'<a href="https://dexscreener.com/solana/{t.mint}">DexScreener</a>',
-        f'<a href="https://gmgn.ai/sol/token/{t.mint}">GMGN</a>',
-        f'<a href="https://birdeye.so/token/{t.mint}?chain=solana">Birdeye</a>',
-        f'<a href="https://solscan.io/token/{t.mint}">Solscan</a>',
-    ]
-    extra = []
-    if t.twitter:
-        extra.append(f'<a href="{t.twitter}">X</a>')
-    if t.telegram:
-        extra.append(f'<a href="{t.telegram}">TG</a>')
-    social = (" · ".join(extra) + "\n") if extra else ""
-    reasons = ", ".join(t.reasons[:6]) or "basic filters"
-    desc = ""
-    if t.description:
-        safe = t.description.replace("<", "").replace(">", "").replace("&", "and").replace("\n", " ")
-        desc = f"\n<i>{safe[:160]}</i>\n"
-    buy = (
-        f'<a href="https://t.me/GMGN_sol_bot?start=i_xGrok_{t.mint}">GMGN bot</a> · '
-        f'<a href="https://t.me/BloomSolana_bot?start=ca_{t.mint}">Bloom</a> · '
-        f'<a href="https://t.me/bonkbot_bot?start=ref_ca_{t.mint}">BonkBot</a>'
-    )
-    return (
-        f"\U0001f525 <b>{t.symbol}</b> — {t.name}\n"
-        f"Score <b>{t.score}/100</b> · {t.source} · age {age}\n"
-        f"MCAP {fmt_usd(t.usd_mcap)} · replies {t.replies} · curve {t.curve_pct:.0f}%\n"
-        f"1h vol {fmt_usd(t.volume_h1)} · liq {fmt_usd(t.liquidity_usd)} · "
-        f"1h {t.price_change_h1:+.0f}%\n"
-        f"Why: {reasons}\n"
-        f"{desc}{social}"
-        f"<code>{t.mint}</code>\n"
-        f"{' · '.join(links)}\n"
-        f"Buy quick: {buy}"
+    ratio = (t.buys_h1 / max(t.sells_h1, 1)) if t.buys_h1 else 0
+    risk = f"Rug {t.rug_score}" if t.rug_score is not None else "Rug n/a"
+
+    links = (
+        f'<a href="https://dexscreener.com/solana/{t.mint}">Dex</a> · '
+        f'<a href="https://gmgn.ai/sol/token/{t.mint}">GMGN</a> · '
+        f'<a href="https://solscan.io/token/{t.mint}">Solscan</a>'
     )
 
+    momentum = []
+    if t.price_change_h1:
+        momentum.append(f"{t.price_change_h1:+.0f}% 1h")
+    if ratio:
+        momentum.append(f"B/S {ratio:.1f}x")
+    momentum_text = " · ".join(momentum) if momentum else "momentum n/a"
+
+    return (
+        f"🔥 <b>{t.symbol}</b>\n"
+        f"Score <b>{t.score}/100</b> · age {age} · {risk}\n"
+        f"MCAP <b>{fmt_usd(t.usd_mcap)}</b> · Liq {fmt_usd(t.liquidity_usd)}\n"
+        f"Vol 1h {fmt_usd(t.volume_h1)} · {momentum_text}\n"
+        f"\n<code>{t.mint}</code>\n"
+        f"{links}"
+    )
 
 HELP = (
     "Solana memecoin scanner is running.\n\n"
