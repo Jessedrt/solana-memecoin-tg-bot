@@ -77,6 +77,9 @@ class handler(BaseHTTPRequestHandler):
                     chat_id=chat_id,
                 )
 
+            elif cmd == "/performance":
+                tg.send(serverless.today_performance_text(), chat_id=chat_id)
+
             elif cmd == "/schedule":
                 result = serverless.ensure_qstash_schedule()
                 if result.get("configured"):
@@ -104,7 +107,7 @@ class handler(BaseHTTPRequestHandler):
                             chat_id=chat_id,
                         )
             else:
-                tg.send("Use /start, /scan, /status, /schedule or /help.", chat_id=chat_id)
+                tg.send("Use /start, /scan, /status, /performance, /schedule or /help.", chat_id=chat_id)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
