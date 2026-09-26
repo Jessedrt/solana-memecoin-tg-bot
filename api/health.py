@@ -15,6 +15,7 @@ class handler(BaseHTTPRequestHandler):
             "telegram_token": bool(bot.TELEGRAM_BOT_TOKEN),
             "chat_registered": bool(serverless.get_chat_id()),
             "redis": serverless.has_redis(),
+            "redis_backend": ("url" if serverless.STANDARD_REDIS_URL else ("rest" if serverless.REDIS_REST_URL else "none")),
             "qstash": bool(serverless.QSTASH_TOKEN),
             "scheduler": serverless.SCAN_CRON,
         }
