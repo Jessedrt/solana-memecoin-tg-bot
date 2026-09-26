@@ -73,6 +73,21 @@ class handler(BaseHTTPRequestHandler):
                     chat_id=chat_id,
                 )
 
+            elif cmd == "/schedule":
+                result = serverless.ensure_qstash_schedule()
+                if result.get("configured"):
+                    tg.send(
+                        "Automatic scanning enabled ✅\n"
+                        f"Schedule: <code>{result.get('cron')}</code>\n"
+                        f"ID: <code>{result.get('schedule_id')}</code>",
+                        chat_id=chat_id,
+                    )
+                else:
+                    tg.send(
+                        f"Could not enable schedule: <code>{result.get('reason', 'unknown')}</code>",
+                        chat_id=chat_id,
+                    )
+
             elif cmd == "/scan":
                 tg.send("Scan queued…", chat_id=chat_id)
                 if not serverless.trigger_qstash_scan():
@@ -85,7 +100,7 @@ class handler(BaseHTTPRequestHandler):
                             chat_id=chat_id,
                         )
             else:
-                tg.send("Use /start, /scan, /status or /help.", chat_id=chat_id)
+                tg.send("Use /start, /scan, /status, /schedule or /help.", chat_id=chat_id)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
