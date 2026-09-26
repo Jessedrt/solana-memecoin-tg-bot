@@ -61,6 +61,7 @@ class Token:
     symbol: str
     source: str
     usd_mcap: float = 0.0
+    price_usd: float = 0.0
     replies: int = 0
     created_ms: int = 0
     complete: bool = False
@@ -217,6 +218,7 @@ def dexscreener_enrich(token: Token) -> None:
         return
     pair = max(sol, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
     token.liquidity_usd = float((pair.get("liquidity") or {}).get("usd") or 0)
+    token.price_usd = float(pair.get("priceUsd") or 0)
     vol = pair.get("volume") or {}
     token.volume_h1 = float(vol.get("h1") or 0)
     ch = pair.get("priceChange") or {}
@@ -316,6 +318,7 @@ def from_gecko_pool(raw: dict[str, Any]) -> Token:
         symbol=base_name,
         source="gecko-new",
         usd_mcap=num(attrs.get("market_cap_usd") or attrs.get("fdv_usd")),
+        price_usd=num(attrs.get("base_token_price_usd")),
         created_ms=created_ms,
         volume_h1=num(volume.get("h1")),
         liquidity_usd=num(attrs.get("reserve_in_usd")),
@@ -495,6 +498,7 @@ HELP = (
     "/start — register this chat for alerts\n"
     "/scan — force a scan now\n"
     "/status — filters + last stats\n"
+    "/performance — today's alert performance\n"
     "/help — this message\n\n"
     "I watch Pump.fun + RugCheck + DexScreener and ping you when a coin "
     "looks like it has early traction (mcap, replies, curve, volume).\n\n"
