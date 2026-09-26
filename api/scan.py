@@ -40,7 +40,8 @@ class handler(BaseHTTPRequestHandler):
             return
         try:
             stats = serverless.run_scan(require_durable_state=True)
-            self._reply(200, {"ok": True, "stats": stats, "state": "upstash"})
+            bot.log.info("scan complete stats=%s", stats)
+            self._reply(200, {"ok": True, "stats": stats, "state": "redis"})
         except Exception as exc:
             bot.log.exception("serverless scan failed: %s", exc)
             self._reply(503, {"ok": False, "error": str(exc)[:500]})
