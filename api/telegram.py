@@ -63,6 +63,9 @@ class handler(BaseHTTPRequestHandler):
             elif cmd == "/scan":
                 serverless.run_scan(require_durable_state=True)
 
+            elif cmd == "/performance":
+                tg.send(serverless.today_performance_text(), chat_id=chat_id)
+
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
                 if not result.get("configured"):
