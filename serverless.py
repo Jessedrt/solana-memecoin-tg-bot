@@ -30,6 +30,7 @@ STATS_KEY = "sol-meme:last-stats"
 LOCK_KEY = "sol-meme:scan-lock"
 PERFORMANCE_KEY = "sol-meme:performance"
 PERFORMANCE_REFRESH_KEY = "sol-meme:performance:last-refresh"
+SIGNAL_SNAPSHOT_KEY = "sol-meme:early-signal-snapshots"
 PERFORMANCE_REFRESH_SECONDS = max(120, int(os.getenv("PERFORMANCE_REFRESH_SECONDS", "300")))
 REPORT_TZ_OFFSET_HOURS = int(os.getenv("REPORT_TZ_OFFSET_HOURS", "1"))
 
@@ -214,6 +215,9 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     stats["seen"] = len(tokens)
     now = time.time()
     cooldown = bot.ALERT_COOLDOWN_MINUTES * 60
+    signal_snapshots = load_json(SIGNAL_SNAPSHOT_KEY, {})
+    if not isinstance(signal_snapshots, dict):
+        signal_snapshots = {}
 
     survivors: list[bot.Token] = []
     for token in tokens:
@@ -246,12 +250,35 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
 
         if token.source.startswith("pump") or token.usd_mcap >= bot.MIN_MCAP_USD:
             token.rug_score = bot.rugcheck_score(token.mint)
+
+        previous = signal_snapshots.get(token.mint) or {}
         bot.score_token(token)
+        bot.early_pump_score(token, previous)
         stats["scored"] += 1
 
-        if token.score < bot.MIN_SCORE:
+        # Save the current observation even when no alert is sent. The next scan
+        # can then detect genuine acceleration instead of relying on one snapshot.
+        signal_snapshots[token.mint] = {
+            "ts": int(now),
+            "price_usd": float(token.price_usd or 0),
+            "usd_mcap": float(token.usd_mcap or 0),
+            "liquidity_usd": float(token.liquidity_usd or 0),
+            "volume_m5": float(token.volume_m5 or 0),
+            "buys_m5": int(token.buys_m5 or 0),
+            "sells_m5": int(token.sells_m5 or 0),
+            "price_change_m5": float(token.price_change_m5 or 0),
+        }
+
+        regular_alert = token.score >= bot.MIN_SCORE
+        early_alert = (
+            token.early_score >= bot.PRE_PUMP_MIN_SCORE
+            and token.rug_score is not None
+            and token.rug_score < 60
+            and token.price_change_m5 < 80
+        )
+        if not (regular_alert or early_alert):
             continue
-        if token.source == "rugcheck-new" and token.usd_mcap < bot.MIN_MCAP_USD and token.score < 70:
+        if token.source == "rugcheck-new" and token.usd_mcap < bot.MIN_MCAP_USD and token.score < 70 and not early_alert:
             continue
 
         # Use sendMessage so Telegram can render the Pump/Dex web preview.
@@ -276,6 +303,14 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         state[token.mint] = float(sent_at)
         stats["alerted"] += 1
         time.sleep(0.2)
+
+    # Keep only recent observations; this is a rolling signal cache, not history.
+    signal_cutoff = now - 7200
+    signal_snapshots = {
+        mint: snap for mint, snap in signal_snapshots.items()
+        if isinstance(snap, dict) and float(snap.get("ts") or 0) >= signal_cutoff
+    }
+    save_json(SIGNAL_SNAPSHOT_KEY, signal_snapshots, ttl_seconds=10800)
 
     save_alert_state(state)
     save_last_stats(stats)
