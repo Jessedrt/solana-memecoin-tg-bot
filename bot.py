@@ -73,6 +73,10 @@ class Token:
     image: str = ""
     description: str = ""
     virtual_sol: float = 0.0
+    real_sol: float = 0.0
+    virtual_token_raw: float = 0.0
+    real_token_raw: float = 0.0
+    pump_checked: bool = False
     live: bool = False
     king_hill: bool = False
     volume_h1: float = 0.0
@@ -180,6 +184,115 @@ def pump_list(sort: str, limit: int = 30) -> list[dict[str, Any]]:
     url = f"{PUMP_API}/coins?offset=0&limit={limit}&sort={sort}&order=DESC&includeNsfw=false"
     data = http_get(url)
     return data if isinstance(data, list) else []
+
+
+def is_pump_token(token: Token) -> bool:
+    return (
+        token.source.startswith("pump")
+        or "pump" in (token.dex_id or "").lower()
+        or token.mint.lower().endswith("pump")
+    )
+
+
+def pump_enrich(token: Token) -> bool:
+    """Load Pump's own bonding-curve state for a known mint."""
+    if not is_pump_token(token):
+        return False
+    try:
+        raw = http_get(f"{PUMP_API}/coins-v2/{token.mint}", timeout=10)
+        if isinstance(raw, dict) and isinstance(raw.get("coin"), dict):
+            raw = raw["coin"]
+        if not isinstance(raw, dict):
+            return False
+        fresh = from_pump(raw, token.source or "pump")
+        token.pump_checked = True
+        token.complete = fresh.complete
+        token.virtual_sol = fresh.virtual_sol
+        token.real_sol = fresh.real_sol
+        token.virtual_token_raw = fresh.virtual_token_raw
+        token.real_token_raw = fresh.real_token_raw
+        if fresh.usd_mcap > 0:
+            token.usd_mcap = fresh.usd_mcap
+        if fresh.created_ms:
+            token.created_ms = fresh.created_ms
+        token.twitter = token.twitter or fresh.twitter
+        token.telegram = token.telegram or fresh.telegram
+        token.website = token.website or fresh.website
+        token.image = token.image or fresh.image
+        token.description = token.description or fresh.description
+        if token.name in ("", "?"):
+            token.name = fresh.name
+        if token.symbol in ("", "?"):
+            token.symbol = fresh.symbol
+        return True
+    except Exception as exc:
+        log.debug("pump coin lookup failed for %s: %s", token.mint, exc)
+        return False
+
+
+def dex_exit_estimate(liquidity_usd: float, notional_usd: float) -> tuple[float, float]:
+    """Approximate constant-product sell proceeds using half of total LP as quote reserve."""
+    if liquidity_usd <= 0 or notional_usd <= 0:
+        return 0.0, 100.0
+    quote_reserve = liquidity_usd / 2.0
+    proceeds = notional_usd / (1.0 + (notional_usd / max(quote_reserve, 1e-9)))
+    impact = max(0.0, (1.0 - proceeds / notional_usd) * 100.0)
+    return proceeds, impact
+
+
+def pump_exit_estimate(token: Token, notional_usd: float) -> tuple[float, float]:
+    """Estimate a Pump bonding-curve sell from its real + virtual reserves."""
+    if (
+        not token.pump_checked
+        or token.complete
+        or token.price_usd <= 0
+        or token.virtual_sol <= 0
+        or token.virtual_token_raw <= 0
+        or token.real_sol <= 0
+    ):
+        return 0.0, 100.0
+
+    # Pump tokens use 6 decimals. Infer SOL/USD from the curve spot price
+    # and the independently observed USD token price.
+    token_price_sol = (token.virtual_sol / token.virtual_token_raw) * 1_000_000
+    if token_price_sol <= 0:
+        return 0.0, 100.0
+    sol_usd = token.price_usd / token_price_sol
+    if sol_usd <= 0:
+        return 0.0, 100.0
+
+    token_amount_raw = (notional_usd / token.price_usd) * 1_000_000
+    v_sol = token.virtual_sol
+    v_tok = token.virtual_token_raw
+    k = v_sol * v_tok
+    new_v_sol = k / (v_tok + token_amount_raw)
+    sol_out = max(0.0, v_sol - new_v_sol)
+
+    # A sell cannot receive more SOL than is actually present on the curve.
+    sol_out = min(sol_out, token.real_sol)
+    proceeds = sol_out * sol_usd * 0.9875  # conservative fee allowance
+    impact = max(0.0, (1.0 - proceeds / notional_usd) * 100.0)
+    return proceeds, impact
+
+
+def exit_estimates(token: Token) -> list[tuple[int, float, float]]:
+    rows: list[tuple[int, float, float]] = []
+    for size in (1000, 10000, 100000):
+        if is_pump_token(token) and not token.complete:
+            proceeds, impact = pump_exit_estimate(token, float(size))
+        else:
+            proceeds, impact = dex_exit_estimate(token.liquidity_usd, float(size))
+        rows.append((size, proceeds, impact))
+    return rows
+
+
+def has_exit_capacity(token: Token) -> bool:
+    """Require a meaningful $1K exit before emitting an Early Pump alert."""
+    rows = exit_estimates(token)
+    if not rows:
+        return False
+    _, proceeds, _ = rows[0]
+    return proceeds >= 800.0
 
 
 def rugcheck_new() -> list[dict[str, Any]]:
@@ -341,6 +454,17 @@ def from_pump(raw: dict[str, Any], source: str) -> Token:
         virt_sol = float(virt) / 1e9 if float(virt) > 1000 else float(virt or 0)
     except (TypeError, ValueError):
         virt_sol = 0.0
+    try:
+        real_raw = float(raw.get("real_sol_reserves") or 0)
+        real_sol = real_raw / 1e9 if real_raw > 1000 else real_raw
+    except (TypeError, ValueError):
+        real_sol = 0.0
+    try:
+        virtual_token_raw = float(raw.get("virtual_token_reserves") or 0)
+        real_token_raw = float(raw.get("real_token_reserves") or 0)
+    except (TypeError, ValueError):
+        virtual_token_raw = 0.0
+        real_token_raw = 0.0
     created = raw.get("created_timestamp") or 0
     try:
         created = int(created)
@@ -361,6 +485,10 @@ def from_pump(raw: dict[str, Any], source: str) -> Token:
         image=str(raw.get("image_uri") or ""),
         description=str(raw.get("description") or "")[:240],
         virtual_sol=virt_sol,
+        real_sol=real_sol,
+        virtual_token_raw=virtual_token_raw,
+        real_token_raw=real_token_raw,
+        pump_checked=bool(raw.get("mint")),
         live=bool(raw.get("is_currently_live")),
         king_hill=bool(raw.get("king_of_the_hill_timestamp")),
     )
@@ -701,11 +829,7 @@ def format_alert(t: Token) -> str:
         socials.append(f'<a href="{html.escape(t.website, quote=True)}">Web</a>')
     social_text = " · ".join(socials) if socials else "None detected"
 
-    pump_like = (
-        t.source.startswith("pump")
-        or "pump" in (t.dex_id or "").lower()
-        or t.mint.lower().endswith("pump")
-    )
+    pump_like = is_pump_token(t)
     dex = f"https://dexscreener.com/solana/{t.mint}"
     pump = f"https://pump.fun/coin/{t.mint}"
     primary_url = t.pair_url or (pump if pump_like else dex)
@@ -755,6 +879,16 @@ def format_alert(t: Token) -> str:
             f"🚨 <b>Early Pump</b>  <b>{t.early_score}/100</b>\n"
             f"└ {html.escape(', '.join(t.early_reasons[:6]))}\n\n"
             if t.early_score >= PRE_PUMP_MIN_SCORE else ""
+        )
+        + "💧 <b>Exit check</b>\n"
+        + "".join(
+            f"{'├' if size != 100000 else '└'} ${size//1000}K → <b>${proceeds:,.0f}</b> · impact {impact:.0f}%\n"
+            for size, proceeds, impact in exit_estimates(t)
+        )
+        + (
+            f"└ Curve real SOL <b>{t.real_sol:.2f}</b>\n\n"
+            if pump_like and not t.complete
+            else "\n"
         )
         + f"🧠 <b>Why alerted</b>\n"
         f"└ {reasons}\n\n"
