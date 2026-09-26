@@ -12,6 +12,7 @@ Discovery + scoring only. Not financial advice. Most Pump.fun tokens go to zero.
 from __future__ import annotations
 
 import json
+import html
 import logging
 import os
 import time
@@ -461,73 +462,89 @@ def fmt_usd(n: float) -> str:
 def format_alert(t: Token) -> str:
     age = f"{t.age_min:.0f}m" if t.age_min < 120 else f"{t.age_min/60:.1f}h"
     ratio = (t.buys_h1 / max(t.sells_h1, 1)) if t.buys_h1 else 0
-    rug = str(t.rug_score) if t.rug_score is not None else "n/a"
+    rug = t.rug_score
+    rug_text = f"{rug}/100" if rug is not None else "n/a"
+    rug_badge = (
+        "🟢" if rug is not None and rug <= 20
+        else "🟡" if rug is not None and rug < 60
+        else "🔴" if rug is not None
+        else "⚪️"
+    )
 
-    reasons = ", ".join(t.reasons[:8]) or "passed scanner filters"
+    symbol = html.escape(t.symbol or "?")
+    name = html.escape(t.name or t.symbol or "?")
+    reasons = html.escape(", ".join(t.reasons[:8]) or "passed scanner filters")
+
+    if t.price_usd > 0:
+        if t.price_usd >= 1:
+            price_text = f"\${t.price_usd:,.4f}"
+        elif t.price_usd >= 0.01:
+            price_text = f"\${t.price_usd:.6f}"
+        else:
+            price_text = f"\${t.price_usd:.10f}".rstrip("0").rstrip(".")
+    else:
+        price_text = "n/a"
 
     socials = []
     if t.twitter:
-        socials.append(f'<a href="{t.twitter}">X</a>')
+        socials.append(f'<a href="{html.escape(t.twitter, quote=True)}">X</a>')
     if t.telegram:
-        socials.append(f'<a href="{t.telegram}">Telegram</a>')
+        socials.append(f'<a href="{html.escape(t.telegram, quote=True)}">TG</a>')
     if t.website:
-        socials.append(f'<a href="{t.website}">Website</a>')
+        socials.append(f'<a href="{html.escape(t.website, quote=True)}">Web</a>')
     social_text = " · ".join(socials) if socials else "None detected"
 
-    market_links = (
-        f'<a href="https://dexscreener.com/solana/{t.mint}">DexScreener</a> · '
-        f'<a href="https://gmgn.ai/sol/token/{t.mint}">GMGN</a> · '
-        f'<a href="https://birdeye.so/token/{t.mint}?chain=solana">Birdeye</a> · '
-        f'<a href="https://solscan.io/token/{t.mint}">Solscan</a>'
-    )
+    pump = f"https://pump.fun/coin/{t.mint}"
+    dex = f"https://dexscreener.com/solana/{t.mint}"
+    gmgn = f"https://gmgn.ai/sol/token/{t.mint}"
+    birdeye = f"https://birdeye.so/token/{t.mint}?chain=solana"
+    solscan = f"https://solscan.io/token/{t.mint}"
 
-    quick_buy = (
-        f'<a href="https://t.me/GMGN_sol_bot?start=i_xGrok_{t.mint}">GMGN bot</a> · '
+    lore = ""
+    if t.description:
+        safe = html.escape(t.description.replace("\n", " ").strip())
+        lore = f"\n├ Lore  <i>{safe[:180]}</i>"
+
+    buy_links = (
+        f'<a href="https://t.me/GMGN_sol_bot?start=i_xGrok_{t.mint}">GMGN</a> · '
         f'<a href="https://t.me/BloomSolana_bot?start=ca_{t.mint}">Bloom</a> · '
         f'<a href="https://t.me/bonkbot_bot?start=ref_ca_{t.mint}">BonkBot</a>'
     )
 
-    desc = ""
-    if t.description:
-        safe = (
-            t.description.replace("<", "").replace(">", "")
-            .replace("&", "and").replace("\n", " ")
-        )
-        desc = f"\n📝 <b>About</b>\n<i>{safe[:180]}</i>\n"
-
     return (
-        f"🔥 <b>{t.symbol}</b> — {t.name}\n"
-        f"Score <b>{t.score}/100</b> · {t.source} · age {age}\n\n"
+        f"🔥 <b>{name} (\${symbol})</b>\n"
+        f'└ <a href="{pump}">Pump</a> │ ⏱ {age} │ Score <b>{t.score}/100</b>\n\n'
 
-        f"📊 <b>Market</b>\n"
-        f"MCAP: <b>{fmt_usd(t.usd_mcap)}</b>\n"
-        f"Liquidity: <b>{fmt_usd(t.liquidity_usd)}</b>\n"
-        f"1h Volume: <b>{fmt_usd(t.volume_h1)}</b>\n"
-        f"1h Change: <b>{t.price_change_h1:+.0f}%</b>\n\n"
+        f"📊 <b>Stats</b>\n"
+        f"├ USD   <b>{price_text}</b> ({t.price_change_h1:+.0f}% 1H)\n"
+        f"├ MC    <b>{fmt_usd(t.usd_mcap)}</b>\n"
+        f"├ Vol   <b>{fmt_usd(t.volume_h1)}</b>\n"
+        f"├ LP    <b>{fmt_usd(t.liquidity_usd)}</b>\n"
+        f"├ 1H    <b>{t.price_change_h1:+.0f}%</b>  B {t.buys_h1} │ S {t.sells_h1}\n"
+        + (f"└ B/S   <b>{ratio:.1f}x</b>\n\n" if ratio else "└ B/S   n/a\n\n")
 
-        f"⚡ <b>Momentum</b>\n"
-        f"Buys: {t.buys_h1} · Sells: {t.sells_h1}"
-        + (f" · B/S <b>{ratio:.1f}x</b>\n" if ratio else "\n")
-        + f"Replies: {t.replies}\n"
-        f"Curve: {t.curve_pct:.0f}%\n\n"
+        + f"🔗 <b>Socials</b>\n"
+        f"├ {social_text}"
+        f"{lore}\n\n"
 
-        f"🛡 <b>Safety</b>\n"
-        f"RugCheck Risk: <b>{rug}/100</b> " + ("🟢" if t.rug_score is not None and t.rug_score <= 20 else "🟡" if t.rug_score is not None and t.rug_score < 60 else "🔴" if t.rug_score is not None else "⚪️") + "\n"
-        f"Still on curve: {'Yes' if not t.complete else 'No'}\n"
-        f"Socials: {social_text}\n\n"
+        f"🔐 <b>Security</b>\n"
+        f"├ Rug   <b>{rug_text}</b> {rug_badge}\n"
+        f"├ Curve <b>{t.curve_pct:.0f}%</b>\n"
+        f"├ State <b>{'Bonding' if not t.complete else 'Migrated'}</b>\n"
+        f"└ Src   {html.escape(t.source)}\n\n"
 
-        f"🧠 <b>Why PULSE alerted</b>\n"
-        f"{reasons}\n"
-        f"{desc}\n"
+        f"🧠 <b>Why alerted</b>\n"
+        f"└ {reasons}\n\n"
 
-        f"📋 <b>Contract</b>\n"
-        f"<code>{t.mint}</code>\n\n"
+        f"📋 <b>CA</b>\n"
+        f"<code>{html.escape(t.mint)}</code>\n\n"
 
-        f"🔎 <b>Research</b>\n"
-        f"{market_links}\n\n"
-
-        f"⚙️ <b>Quick access</b>\n"
-        f"{quick_buy}"
+        f'<a href="{pump}">PF</a> · '
+        f'<a href="{dex}">DS</a> · '
+        f'<a href="{gmgn}">GMGN</a> · '
+        f'<a href="{birdeye}">BE</a> · '
+        f'<a href="{solscan}">SOL</a>\n'
+        f"Buy: {buy_links}"
     )
 
 HELP = (
