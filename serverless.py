@@ -265,7 +265,7 @@ def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
     try:
         tg = bot.Telegram(bot.TELEGRAM_BOT_TOKEN, chat_id)
         refresh_performance()
-        send_due_daily_reports(tg)
+        # Strict alert-only mode: daily performance is tracked internally but never pushed to Telegram.
         state = load_alert_state()
         return scan_once(tg, state)
     finally:
