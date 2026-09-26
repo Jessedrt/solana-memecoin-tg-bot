@@ -125,7 +125,7 @@ class Telegram:
                     "chat_id": cid,
                     "text": text,
                     "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
+                    "disable_web_page_preview": False,
                 },
                 timeout=20,
             )
