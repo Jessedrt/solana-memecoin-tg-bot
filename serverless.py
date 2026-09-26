@@ -9,11 +9,14 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
+import redis as redis_lib
 
 import bot
 
-REDIS_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip() or os.getenv("KV_REST_API_URL", "").strip()
-REDIS_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip() or os.getenv("KV_REST_API_TOKEN", "").strip()
+REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip() or os.getenv("KV_REST_API_URL", "").strip()
+REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip() or os.getenv("KV_REST_API_TOKEN", "").strip()
+STANDARD_REDIS_URL = os.getenv("REDIS_URL", "").strip()
+_redis_client = None
 QSTASH_TOKEN = os.getenv("QSTASH_TOKEN", "").strip()
 SCANNER_SECRET = os.getenv("SCANNER_SECRET", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -27,15 +30,32 @@ LOCK_KEY = "sol-meme:scan-lock"
 
 
 def has_redis() -> bool:
-    return bool(REDIS_URL and REDIS_TOKEN)
+    return bool(STANDARD_REDIS_URL or (REDIS_REST_URL and REDIS_REST_TOKEN))
+
+
+def _standard_redis():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis_lib.Redis.from_url(
+            STANDARD_REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=8,
+            health_check_interval=30,
+        )
+    return _redis_client
 
 
 def redis_command(*parts: Any) -> Any:
-    if not has_redis():
-        raise RuntimeError("Upstash Redis is not configured")
+    if STANDARD_REDIS_URL:
+        return _standard_redis().execute_command(*parts)
+
+    if not (REDIS_REST_URL and REDIS_REST_TOKEN):
+        raise RuntimeError("Redis is not configured")
+
     r = requests.post(
-        REDIS_URL,
-        headers={"Authorization": f"Bearer {REDIS_TOKEN}", "Content-Type": "application/json"},
+        REDIS_REST_URL,
+        headers={"Authorization": f"Bearer {REDIS_REST_TOKEN}", "Content-Type": "application/json"},
         json=list(parts),
         timeout=10,
     )
@@ -160,7 +180,7 @@ def production_base_url() -> str:
 
 
 def scanner_status_text(state_count: int, stats: dict[str, int]) -> str:
-    backend = "Upstash Redis ✅" if has_redis() else "stateless ⚠️"
+    backend = "Redis ✅" if has_redis() else "stateless ⚠️"
     return (
         "Scanner status\n"
         f"• age ≤ {bot.MAX_AGE_MINUTES}m\n"
@@ -222,7 +242,7 @@ def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
     if not bot.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
     if require_durable_state and not has_redis():
-        raise RuntimeError("Automatic scanning requires Upstash Redis")
+        raise RuntimeError("Automatic scanning requires Redis")
 
     chat_id = get_chat_id()
     if not chat_id:
