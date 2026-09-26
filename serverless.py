@@ -242,6 +242,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
 
     for token in enrich_batch:
         bot.dexscreener_enrich(token)
+        if bot.is_pump_token(token):
+            bot.pump_enrich(token)
 
         # DexScreener discovery rows do not include pair age/MCAP up front.
         # Re-run hard filters after enrichment using the real pool data.
@@ -269,10 +271,28 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             "price_change_m5": float(token.price_change_m5 or 0),
         }
 
-        regular_alert = token.score >= bot.MIN_SCORE
+        pump_curve_ok = (
+            not bot.is_pump_token(token)
+            or token.complete
+            or token.pump_checked
+        )
+        core_checked = (
+            token.rug_score is not None
+            and token.price_usd > 0
+            and token.usd_mcap > 0
+            and token.liquidity_usd > 0
+            and token.created_ms > 0
+            and pump_curve_ok
+        )
+        exit_ok = bot.has_exit_capacity(token)
+
+        # Risk-first rule: unknown core data is unsafe, and a signal that cannot
+        # support a reasonable $1K exit is not sent as an actionable alert.
+        regular_alert = token.score >= bot.MIN_SCORE and core_checked and exit_ok
         early_alert = (
             token.early_score >= bot.PRE_PUMP_MIN_SCORE
-            and token.rug_score is not None
+            and core_checked
+            and exit_ok
             and token.rug_score < 60
             and token.price_change_m5 < 80
         )
