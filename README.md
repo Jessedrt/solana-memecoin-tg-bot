@@ -77,3 +77,5 @@ Never commit bot tokens, Redis tokens, QStash tokens, wallet seed phrases or pri
 <!-- deploy-latest-redis-url-support -->
 
 <!-- trigger-after-vercel-git-reconnect -->
+
+<!-- trigger-after-qstash-connect -->
