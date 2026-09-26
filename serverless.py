@@ -238,7 +238,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         if token.source == "rugcheck-new" and token.usd_mcap < bot.MIN_MCAP_USD and token.score < 70:
             continue
 
-        sent_at = tg.send(bot.format_alert(token), image=token.image or None)
+        # Use sendMessage so Telegram can render the Pump/Dex web preview.
+        sent_at = tg.send(bot.format_alert(token))
         if sent_at is None:
             bot.log.warning("Alert send failed for %s; not adding to performance tracking", token.mint)
             continue
