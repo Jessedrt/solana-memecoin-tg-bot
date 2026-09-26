@@ -226,8 +226,24 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     stats["filtered"] = len(survivors)
     survivors.sort(key=lambda x: (x.replies, x.usd_mcap), reverse=True)
 
-    for token in survivors[:ENRICH_LIMIT]:
+    # Reserve part of each pass for independent DexScreener discoveries so
+    # Gecko/RugCheck candidates cannot consume every enrichment slot.
+    ds_candidates = [t for t in survivors if t.source.startswith("dexscreener-")]
+    other_candidates = [t for t in survivors if not t.source.startswith("dexscreener-")]
+    ds_slots = max(2, ENRICH_LIMIT // 3)
+    enrich_batch = other_candidates[: max(0, ENRICH_LIMIT - ds_slots)] + ds_candidates[:ds_slots]
+    if len(enrich_batch) < ENRICH_LIMIT:
+        used = {t.mint for t in enrich_batch}
+        enrich_batch.extend([t for t in survivors if t.mint not in used][: ENRICH_LIMIT - len(enrich_batch)])
+
+    for token in enrich_batch:
         bot.dexscreener_enrich(token)
+
+        # DexScreener discovery rows do not include pair age/MCAP up front.
+        # Re-run hard filters after enrichment using the real pool data.
+        if not bot.passes_hard_filters(token):
+            continue
+
         if token.source.startswith("pump") or token.usd_mcap >= bot.MIN_MCAP_USD:
             token.rug_score = bot.rugcheck_score(token.mint)
         bot.score_token(token)
