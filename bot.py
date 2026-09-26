@@ -80,6 +80,7 @@ class Token:
     buys_h1: int = 0
     sells_h1: int = 0
     pair_url: str = ""
+    dex_id: str = ""
     rug_score: int | None = None
     reasons: list[str] = field(default_factory=list)
     score: int = 0
@@ -183,6 +184,56 @@ def rugcheck_new() -> list[dict[str, Any]]:
         return []
 
 
+def dexscreener_latest(endpoint: str) -> list[dict[str, Any]]:
+    """Fetch broad Solana discovery rows from a public DexScreener feed."""
+    try:
+        data = http_get(f"{DS_API}/{endpoint}", timeout=12)
+    except Exception as exc:
+        log.warning("dexscreener %s discovery failed: %s", endpoint, exc)
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+    return [
+        row for row in data
+        if isinstance(row, dict) and str(row.get("chainId") or "").lower() == "solana"
+    ]
+
+
+def from_dexscreener_discovery(raw: dict[str, Any], source: str) -> Token:
+    links = raw.get("links") or []
+    twitter = ""
+    telegram = ""
+    website = ""
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        url = str(link.get("url") or "")
+        kind = str(link.get("type") or link.get("label") or "").lower()
+        if not url:
+            continue
+        if "twitter" in kind or "x.com" in url or "twitter.com" in url:
+            twitter = twitter or url
+        elif "telegram" in kind or "t.me/" in url:
+            telegram = telegram or url
+        elif not website:
+            website = url
+
+    return Token(
+        mint=str(raw.get("tokenAddress") or ""),
+        name=str(raw.get("description") or "?")[:80] or "?",
+        symbol="?",
+        source=source,
+        twitter=twitter,
+        telegram=telegram,
+        website=website,
+        image=str(raw.get("icon") or ""),
+        description=str(raw.get("description") or "")[:240],
+        pair_url=str(raw.get("url") or ""),
+    )
+
+
 def gecko_new_pools() -> list[dict[str, Any]]:
     """Fetch newly created Solana pools from GeckoTerminal's public API."""
     rows: list[dict[str, Any]] = []
@@ -232,7 +283,41 @@ def dexscreener_enrich(token: Token) -> None:
     tx = (pair.get("txns") or {}).get("h1") or {}
     token.buys_h1 = int(tx.get("buys") or 0)
     token.sells_h1 = int(tx.get("sells") or 0)
-    token.pair_url = pair.get("url") or ""
+    token.pair_url = pair.get("url") or token.pair_url or ""
+    token.dex_id = str(pair.get("dexId") or token.dex_id or "")
+
+    base = pair.get("baseToken") or {}
+    if token.symbol in ("", "?"):
+        token.symbol = str(base.get("symbol") or token.symbol or "?")
+    if token.name in ("", "?") or token.source.startswith("dexscreener-"):
+        token.name = str(base.get("name") or token.name or token.symbol or "?")
+
+    created = pair.get("pairCreatedAt")
+    if created and not token.created_ms:
+        try:
+            token.created_ms = int(created)
+        except (TypeError, ValueError):
+            pass
+
+    info = pair.get("info") or {}
+    if not token.image:
+        token.image = str(info.get("imageUrl") or "")
+    websites = info.get("websites") or []
+    if not token.website and websites:
+        first = websites[0] if isinstance(websites[0], dict) else {}
+        token.website = str(first.get("url") or "")
+    for social in info.get("socials") or []:
+        if not isinstance(social, dict):
+            continue
+        platform = str(social.get("platform") or "").lower()
+        handle = str(social.get("handle") or social.get("url") or "")
+        if not handle:
+            continue
+        if platform in ("twitter", "x") and not token.twitter:
+            token.twitter = handle if handle.startswith("http") else f"https://x.com/{handle.lstrip('@')}"
+        elif platform == "telegram" and not token.telegram:
+            token.telegram = handle if handle.startswith("http") else f"https://t.me/{handle.lstrip('@')}"
+
     mc = pair.get("marketCap") or pair.get("fdv")
     if mc and token.usd_mcap <= 0:
         token.usd_mcap = float(mc)
@@ -336,6 +421,7 @@ def from_gecko_pool(raw: dict[str, Any]) -> Token:
             if attrs.get("address")
             else ""
         ),
+        dex_id=str((((rel.get("dex") or {}).get("data") or {}).get("id")) or ""),
     )
 
 
@@ -422,7 +508,9 @@ def score_token(t: Token) -> int:
 def passes_hard_filters(t: Token) -> bool:
     if not t.mint:
         return False
-    if t.age_min > MAX_AGE_MINUTES:
+    if t.created_ms and t.age_min > MAX_AGE_MINUTES:
+        return False
+    if not t.created_ms and not t.source.startswith("dexscreener-"):
         return False
     if REQUIRE_STILL_ON_CURVE and t.complete:
         return False
@@ -570,6 +658,22 @@ def collect_candidates() -> list[Token]:
     log.info("fetched %s GeckoTerminal new pools", len(gecko_rows))
     for raw in gecko_rows:
         tok = from_gecko_pool(raw)
+        if tok.mint and tok.mint not in found:
+            found[tok.mint] = tok
+
+    # Independent DexScreener discovery. These feeds span launchpads/DEXes
+    # and reduce reliance on any single new-pool provider.
+    ds_profiles = dexscreener_latest("token-profiles/latest/v1")
+    log.info("fetched %s DexScreener Solana token profiles", len(ds_profiles))
+    for raw in ds_profiles:
+        tok = from_dexscreener_discovery(raw, "dexscreener-profile")
+        if tok.mint and tok.mint not in found:
+            found[tok.mint] = tok
+
+    ds_boosts = dexscreener_latest("token-boosts/latest/v1")
+    log.info("fetched %s DexScreener Solana boosted tokens", len(ds_boosts))
+    for raw in ds_boosts:
+        tok = from_dexscreener_discovery(raw, "dexscreener-boost")
         if tok.mint and tok.mint not in found:
             found[tok.mint] = tok
 
