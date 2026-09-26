@@ -76,7 +76,8 @@ class handler(BaseHTTPRequestHandler):
             elif cmd == "/scan":
                 tg.send("Scan queued…", chat_id=chat_id)
                 if not serverless.trigger_qstash_scan():
-                    stats = serverless.run_scan(require_durable_state=False)
+                    # Manual scans can run inline even before Redis/QStash is connected.
+                    stats = serverless.scan_once(tg, serverless.load_alert_state())
                     if stats.get("alerted", 0) == 0:
                         tg.send(
                             "No high-potential hits this pass.\n"
