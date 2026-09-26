@@ -48,6 +48,7 @@ MIN_MCAP_USD = float(os.getenv("MIN_MCAP_USD", "4000"))
 MAX_MCAP_USD = float(os.getenv("MAX_MCAP_USD", "350000"))
 MIN_REPLIES = int(os.getenv("MIN_REPLIES", "2"))
 MIN_SCORE = int(os.getenv("MIN_SCORE", "55"))
+PRE_PUMP_MIN_SCORE = int(os.getenv("PRE_PUMP_MIN_SCORE", "68"))
 REQUIRE_STILL_ON_CURVE = os.getenv("REQUIRE_STILL_ON_CURVE", "true").lower() == "true"
 REQUIRE_SOCIALS = os.getenv("REQUIRE_SOCIALS", "false").lower() == "true"
 ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "180"))
@@ -75,15 +76,21 @@ class Token:
     live: bool = False
     king_hill: bool = False
     volume_h1: float = 0.0
+    volume_m5: float = 0.0
     liquidity_usd: float = 0.0
     price_change_h1: float = 0.0
+    price_change_m5: float = 0.0
     buys_h1: int = 0
     sells_h1: int = 0
+    buys_m5: int = 0
+    sells_m5: int = 0
     pair_url: str = ""
     dex_id: str = ""
     rug_score: int | None = None
     reasons: list[str] = field(default_factory=list)
     score: int = 0
+    early_score: int = 0
+    early_reasons: list[str] = field(default_factory=list)
 
     @property
     def age_min(self) -> float:
@@ -278,11 +285,16 @@ def dexscreener_enrich(token: Token) -> None:
     token.price_usd = float(pair.get("priceUsd") or 0)
     vol = pair.get("volume") or {}
     token.volume_h1 = float(vol.get("h1") or 0)
+    token.volume_m5 = float(vol.get("m5") or 0)
     ch = pair.get("priceChange") or {}
     token.price_change_h1 = float(ch.get("h1") or 0)
-    tx = (pair.get("txns") or {}).get("h1") or {}
-    token.buys_h1 = int(tx.get("buys") or 0)
-    token.sells_h1 = int(tx.get("sells") or 0)
+    token.price_change_m5 = float(ch.get("m5") or 0)
+    tx_h1 = (pair.get("txns") or {}).get("h1") or {}
+    tx_m5 = (pair.get("txns") or {}).get("m5") or {}
+    token.buys_h1 = int(tx_h1.get("buys") or 0)
+    token.sells_h1 = int(tx_h1.get("sells") or 0)
+    token.buys_m5 = int(tx_m5.get("buys") or 0)
+    token.sells_m5 = int(tx_m5.get("sells") or 0)
     token.pair_url = pair.get("url") or token.pair_url or ""
     token.dex_id = str(pair.get("dexId") or token.dex_id or "")
 
@@ -505,6 +517,113 @@ def score_token(t: Token) -> int:
     return t.score
 
 
+def early_pump_score(t: Token, previous: dict[str, Any] | None = None) -> int:
+    """Score early acceleration signals before a large price move is already obvious."""
+    reasons: list[str] = []
+    pts = 0
+
+    # Avoid calling an already-exploded candle "early".
+    if t.price_change_m5 >= 80 or t.price_change_h1 >= 250:
+        t.early_score = 0
+        t.early_reasons = ["already extended"]
+        return 0
+
+    if t.age_min <= 10:
+        pts += 12
+        reasons.append("very fresh")
+    elif t.age_min <= 30:
+        pts += 10
+        reasons.append("fresh")
+    elif t.age_min <= 60:
+        pts += 5
+
+    if 7000 <= t.usd_mcap <= 60000:
+        pts += 14
+        reasons.append("early MC")
+    elif 60000 < t.usd_mcap <= 150000:
+        pts += 7
+
+    if t.liquidity_usd >= 15000:
+        pts += 10
+        reasons.append("healthy LP")
+    elif t.liquidity_usd >= 7000:
+        pts += 6
+
+    if t.volume_m5 >= 5000:
+        pts += 15
+        reasons.append(f"{fmt_usd(t.volume_m5)} 5m vol")
+    elif t.volume_m5 >= 1690:
+        pts += 10
+        reasons.append(f"{fmt_usd(t.volume_m5)} 5m vol")
+    elif t.volume_m5 >= 800:
+        pts += 5
+
+    if t.buys_m5 >= 20:
+        pts += 14
+        reasons.append(f"{t.buys_m5} buys/5m")
+    elif t.buys_m5 >= 8:
+        pts += 9
+        reasons.append(f"{t.buys_m5} buys/5m")
+
+    if t.buys_m5:
+        ratio = t.buys_m5 / max(t.sells_m5, 1)
+        if ratio >= 2.2:
+            pts += 14
+            reasons.append(f"5m B/S {ratio:.1f}x")
+        elif ratio >= 1.5:
+            pts += 9
+            reasons.append(f"5m B/S {ratio:.1f}x")
+        elif ratio < 0.9:
+            pts -= 8
+
+    if 2 <= t.price_change_m5 <= 25:
+        pts += 10
+        reasons.append(f"+{t.price_change_m5:.0f}% 5m early move")
+    elif 25 < t.price_change_m5 <= 60:
+        pts += 5
+        reasons.append(f"+{t.price_change_m5:.0f}% 5m")
+    elif t.price_change_m5 < -8:
+        pts -= 10
+
+    if t.usd_mcap > 0 and t.volume_m5 / t.usd_mcap >= 0.08:
+        pts += 8
+        reasons.append("high vol/MC")
+
+    if t.twitter or t.telegram or t.website:
+        pts += 4
+        reasons.append("socials")
+
+    # The strongest signal is acceleration between scanner observations.
+    previous = previous or {}
+    prev_vol = float(previous.get("volume_m5") or 0)
+    prev_buys = int(previous.get("buys_m5") or 0)
+    prev_liq = float(previous.get("liquidity_usd") or 0)
+    if prev_vol > 0 and t.volume_m5 >= prev_vol * 1.35:
+        pts += 10
+        reasons.append("5m volume accelerating")
+    if prev_buys > 0 and t.buys_m5 >= max(prev_buys + 3, prev_buys * 1.25):
+        pts += 10
+        reasons.append("buy velocity accelerating")
+    if prev_liq > 0 and t.liquidity_usd >= prev_liq * 1.05:
+        pts += 5
+        reasons.append("liquidity rising")
+
+    # RugCheck is a gate, not proof of safety.
+    if t.rug_score is not None:
+        if t.rug_score <= 20:
+            pts += 8
+            reasons.append("low RugCheck risk")
+        elif t.rug_score < 40:
+            pts += 3
+        elif t.rug_score >= 60:
+            pts -= 35
+            reasons.append("high RugCheck risk")
+
+    t.early_reasons = reasons
+    t.early_score = max(0, min(100, int(pts)))
+    return t.early_score
+
+
 def passes_hard_filters(t: Token) -> bool:
     if not t.mint:
         return False
@@ -632,7 +751,12 @@ def format_alert(t: Token) -> str:
         f"├ State <b>{state_text}</b>\n"
         f"└ Src   {html.escape(t.source)}\n\n"
 
-        f"🧠 <b>Why alerted</b>\n"
+        + (
+            f"🚨 <b>Early Pump</b>  <b>{t.early_score}/100</b>\n"
+            f"└ {html.escape(', '.join(t.early_reasons[:6]))}\n\n"
+            if t.early_score >= PRE_PUMP_MIN_SCORE else ""
+        )
+        + f"🧠 <b>Why alerted</b>\n"
         f"└ {reasons}\n\n"
 
         f"📋 <b>CA</b>\n"
