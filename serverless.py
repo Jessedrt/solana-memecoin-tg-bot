@@ -321,3 +321,15 @@ def ensure_qstash_schedule() -> dict[str, Any]:
         "cron": SCAN_CRON,
         "destination": destination,
     }
+
+
+def claim_telegram_update(update_id: Any, ttl_seconds: int = 86400) -> bool:
+    """Return True only for the first delivery of a Telegram update id."""
+    if update_id in (None, "") or not has_redis():
+        return True
+    key = f"sol-meme:tg-update:{update_id}"
+    try:
+        return redis_command("SET", key, "1", "EX", int(ttl_seconds), "NX") == "OK"
+    except Exception as exc:
+        bot.log.warning("Telegram update dedupe failed: %s", exc)
+        return True
