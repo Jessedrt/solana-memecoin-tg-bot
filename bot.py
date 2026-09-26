@@ -507,7 +507,7 @@ def format_alert(t: Token) -> str:
         f"Curve: {t.curve_pct:.0f}%\n\n"
 
         f"🛡 <b>Safety</b>\n"
-        f"RugCheck: <b>{rug}</b>\n"
+        f"RugCheck Risk: <b>{rug}/100</b> " + ("🟢" if t.rug_score is not None and t.rug_score <= 20 else "🟡" if t.rug_score is not None and t.rug_score < 60 else "🔴" if t.rug_score is not None else "⚪️") + "\n"
         f"Still on curve: {'Yes' if not t.complete else 'No'}\n"
         f"Socials: {social_text}\n\n"
 
