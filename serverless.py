@@ -238,9 +238,25 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         if token.source == "rugcheck-new" and token.usd_mcap < bot.MIN_MCAP_USD and token.score < 70:
             continue
 
-        tg.send(bot.format_alert(token), image=token.image or None)
-        track_alert(token, now)
-        state[token.mint] = now
+        sent_at = tg.send(bot.format_alert(token), image=token.image or None)
+        if sent_at is None:
+            bot.log.warning("Alert send failed for %s; not adding to performance tracking", token.mint)
+            continue
+
+        # Performance starts at the Telegram send time, not discovery/scan time.
+        entry = bot.Token(
+            mint=token.mint,
+            name=token.name,
+            symbol=token.symbol,
+            source="telegram-entry",
+        )
+        bot.dexscreener_enrich(entry)
+        if entry.price_usd <= 0 and entry.usd_mcap <= 0:
+            entry.price_usd = token.price_usd
+            entry.usd_mcap = token.usd_mcap
+
+        track_alert(entry, float(sent_at))
+        state[token.mint] = float(sent_at)
         stats["alerted"] += 1
         time.sleep(0.2)
 
