@@ -582,8 +582,19 @@ def format_alert(t: Token) -> str:
         socials.append(f'<a href="{html.escape(t.website, quote=True)}">Web</a>')
     social_text = " · ".join(socials) if socials else "None detected"
 
-    pump = f"https://pump.fun/coin/{t.mint}"
+    pump_like = (
+        t.source.startswith("pump")
+        or "pump" in (t.dex_id or "").lower()
+        or t.mint.lower().endswith("pump")
+    )
     dex = f"https://dexscreener.com/solana/{t.mint}"
+    pump = f"https://pump.fun/coin/{t.mint}"
+    primary_url = t.pair_url or (pump if pump_like else dex)
+    venue = html.escape(t.dex_id or ("Pump" if pump_like else t.source))
+    state_text = (
+        ("Migrated" if t.complete else "Bonding")
+        if pump_like else "DEX pool"
+    )
     gmgn = f"https://gmgn.ai/sol/token/{t.mint}"
     birdeye = f"https://birdeye.so/token/{t.mint}?chain=solana"
     solscan = f"https://solscan.io/token/{t.mint}"
@@ -601,7 +612,7 @@ def format_alert(t: Token) -> str:
 
     return (
         f"🔥 <b>{name} (\${symbol})</b>\n"
-        f'└ <a href="{pump}">Pump</a> │ ⏱ {age} │ Score <b>{t.score}/100</b>\n\n'
+        f'└ <a href="{primary_url}">{venue}</a> │ ⏱ {age} │ Score <b>{t.score}/100</b>\n\n'
 
         f"📊 <b>Stats</b>\n"
         f"├ USD   <b>{price_text}</b> ({t.price_change_h1:+.0f}% 1H)\n"
@@ -618,7 +629,7 @@ def format_alert(t: Token) -> str:
         f"🔐 <b>Security</b>\n"
         f"├ Rug   <b>{rug_text}</b> {rug_badge}\n"
         f"├ Curve <b>{t.curve_pct:.0f}%</b>\n"
-        f"├ State <b>{'Bonding' if not t.complete else 'Migrated'}</b>\n"
+        f"├ State <b>{state_text}</b>\n"
         f"└ Src   {html.escape(t.source)}\n\n"
 
         f"🧠 <b>Why alerted</b>\n"
@@ -627,8 +638,8 @@ def format_alert(t: Token) -> str:
         f"📋 <b>CA</b>\n"
         f"<code>{html.escape(t.mint)}</code>\n\n"
 
-        f'<a href="{pump}">PF</a> · '
-        f'<a href="{dex}">DS</a> · '
+        (f'<a href="{pump}">PF</a> · ' if pump_like else "")
+        + f'<a href="{dex}">DS</a> · '
         f'<a href="{gmgn}">GMGN</a> · '
         f'<a href="{birdeye}">BE</a> · '
         f'<a href="{solscan}">SOL</a>\n'
