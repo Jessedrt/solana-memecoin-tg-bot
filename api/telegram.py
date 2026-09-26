@@ -80,7 +80,7 @@ class handler(BaseHTTPRequestHandler):
             elif cmd == "/performance":
                 tg.send(serverless.today_performance_text(), chat_id=chat_id)
 
-            elif cmd == "/schedule":
+            elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
                 if result.get("configured"):
                     tg.send(
@@ -96,18 +96,19 @@ class handler(BaseHTTPRequestHandler):
                     )
 
             elif cmd == "/scan":
-                tg.send("Scan queued…", chat_id=chat_id)
-                if not serverless.trigger_qstash_scan():
-                    # Manual scans can run inline even before Redis/QStash is connected.
-                    stats = serverless.scan_once(tg, serverless.load_alert_state())
-                    if stats.get("alerted", 0) == 0:
-                        tg.send(
-                            "No high-potential hits this pass.\n"
-                            f"Seen {stats.get('seen', 0)} · passed {stats.get('filtered', 0)} · scored {stats.get('scored', 0)}",
-                            chat_id=chat_id,
-                        )
+                tg.send("Scanning now…", chat_id=chat_id)
+                stats = serverless.run_scan(require_durable_state=True)
+                if stats.get("skipped"):
+                    tg.send("A scan is already running. Try again in a few seconds.", chat_id=chat_id)
+                else:
+                    tg.send(
+                        "Scan complete ✅\n"
+                        f"Seen {stats.get('seen', 0)} · passed {stats.get('filtered', 0)} · "
+                        f"scored {stats.get('scored', 0)} · alerted {stats.get('alerted', 0)}",
+                        chat_id=chat_id,
+                    )
             else:
-                tg.send("Use /start, /scan, /status, /performance, /schedule or /help.", chat_id=chat_id)
+                tg.send("Use /start, /on, /scan, /status, /performance, /schedule or /help.", chat_id=chat_id)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
