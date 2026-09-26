@@ -60,31 +60,17 @@ class handler(BaseHTTPRequestHandler):
             if cmd == "/start":
                 serverless.register_chat_id(chat_id)
 
-            elif cmd == "/help":
-                tg.send(bot.HELP, chat_id=chat_id)
-
-            elif cmd == "/status":
-                tg.send(
-                    serverless.scanner_status_text(
-                        len(serverless.load_alert_state()),
-                        serverless.load_last_stats(),
-                    ),
-                    chat_id=chat_id,
-                )
-
-            elif cmd == "/performance":
-                tg.send(serverless.today_performance_text(), chat_id=chat_id)
+            elif cmd == "/scan":
+                serverless.run_scan(require_durable_state=True)
 
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
                 if not result.get("configured"):
                     bot.log.warning("Could not enable schedule: %s", result.get("reason", "unknown"))
 
-            elif cmd == "/scan":
-                serverless.run_scan(require_durable_state=True)
-                # Alert-only mode: scan results stay silent unless actual coin alerts are emitted.
             else:
-                bot.log.info("Ignored Telegram command in alert-only mode: %s", cmd)
+                # Strict alert-only mode: all other Telegram commands are ignored silently.
+                bot.log.info("Ignored Telegram command in strict alert-only mode: %s", cmd)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
