@@ -71,6 +71,11 @@ def redis_command(*parts: Any) -> Any:
     return payload.get("result") if isinstance(payload, dict) else payload
 
 
+def redis_ok(value: Any) -> bool:
+    """Normalize Redis SET success across redis-py (True) and REST ("OK")."""
+    return value is True or (isinstance(value, str) and value.upper() == "OK")
+
+
 def load_json(key: str, default: Any) -> Any:
     if not has_redis():
         return default
@@ -158,7 +163,7 @@ def acquire_scan_lock() -> bool:
     if not has_redis():
         return True
     try:
-        return redis_command("SET", LOCK_KEY, str(int(time.time())), "EX", 240, "NX") == "OK"
+        return redis_ok(redis_command("SET", LOCK_KEY, str(int(time.time())), "EX", 240, "NX"))
     except Exception as exc:
         bot.log.warning("Could not acquire scan lock: %s", exc)
         return False
@@ -336,7 +341,7 @@ def claim_telegram_update(update_id: Any, ttl_seconds: int = 86400) -> bool:
         return True
     key = f"sol-meme:tg-update:{update_id}"
     try:
-        return redis_command("SET", key, "1", "EX", int(ttl_seconds), "NX") == "OK"
+        return redis_ok(redis_command("SET", key, "1", "EX", int(ttl_seconds), "NX"))
     except Exception as exc:
         bot.log.warning("Telegram update dedupe failed: %s", exc)
         return True
