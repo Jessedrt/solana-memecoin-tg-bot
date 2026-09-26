@@ -57,16 +57,11 @@ class handler(BaseHTTPRequestHandler):
         cmd = text.split()[0].split("@")[0].lower()
 
         try:
-            if cmd in ("/start", "/help"):
-                persisted = serverless.register_chat_id(chat_id)
+            if cmd == "/start":
+                serverless.register_chat_id(chat_id)
+
+            elif cmd == "/help":
                 tg.send(bot.HELP, chat_id=chat_id)
-                if bot.TELEGRAM_CHAT_ID:
-                    note = "Alerts are locked to the TELEGRAM_CHAT_ID configured in Vercel."
-                elif persisted:
-                    note = "This chat is now registered for scanner alerts."
-                else:
-                    note = "Automatic alerts need TELEGRAM_CHAT_ID or Upstash Redis so this chat can be remembered."
-                tg.send(note, chat_id=chat_id)
 
             elif cmd == "/status":
                 tg.send(
@@ -82,34 +77,17 @@ class handler(BaseHTTPRequestHandler):
 
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
-                if result.get("configured"):
-                    tg.send(
-                        "Automatic scanning enabled ✅\n"
-                        f"Schedule: <code>{result.get('cron')}</code>\n"
-                        f"ID: <code>{result.get('schedule_id')}</code>",
-                        chat_id=chat_id,
-                    )
-                else:
-                    tg.send(
-                        f"Could not enable schedule: <code>{result.get('reason', 'unknown')}</code>",
-                        chat_id=chat_id,
-                    )
+                if not result.get("configured"):
+                    bot.log.warning("Could not enable schedule: %s", result.get("reason", "unknown"))
 
             elif cmd == "/scan":
-                stats = serverless.run_scan(require_durable_state=True)
-                if stats.get("skipped"):
-                    tg.send("A scan is already running. Try again in a few seconds.", chat_id=chat_id)
-                elif stats.get("alerted", 0) == 0:
-                    tg.send("Scan complete — no alert-worthy coins found.", chat_id=chat_id)
-                # When alerts are found, the alert messages themselves are the only Telegram output.
+                serverless.run_scan(require_durable_state=True)
+                # Alert-only mode: scan results stay silent unless actual coin alerts are emitted.
             else:
-                tg.send("Use /start, /on, /scan, /status, /performance, /schedule or /help.", chat_id=chat_id)
+                bot.log.info("Ignored Telegram command in alert-only mode: %s", cmd)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
             bot.log.exception("telegram webhook error: %s", exc)
-            try:
-                tg.send(f"Scanner error: <code>{str(exc)[:250]}</code>", chat_id=chat_id)
-            except Exception:
-                pass
+            # Alert-only mode: operational errors stay in Vercel logs.
             self._reply(500, {"ok": False, "error": str(exc)[:300]})
