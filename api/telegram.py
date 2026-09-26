@@ -96,17 +96,12 @@ class handler(BaseHTTPRequestHandler):
                     )
 
             elif cmd == "/scan":
-                tg.send("Scanning now…", chat_id=chat_id)
                 stats = serverless.run_scan(require_durable_state=True)
                 if stats.get("skipped"):
                     tg.send("A scan is already running. Try again in a few seconds.", chat_id=chat_id)
-                else:
-                    tg.send(
-                        "Scan complete ✅\n"
-                        f"Seen {stats.get('seen', 0)} · passed {stats.get('filtered', 0)} · "
-                        f"scored {stats.get('scored', 0)} · alerted {stats.get('alerted', 0)}",
-                        chat_id=chat_id,
-                    )
+                elif stats.get("alerted", 0) == 0:
+                    tg.send("Scan complete — no alert-worthy coins found.", chat_id=chat_id)
+                # When alerts are found, the alert messages themselves are the only Telegram output.
             else:
                 tg.send("Use /start, /on, /scan, /status, /performance, /schedule or /help.", chat_id=chat_id)
 
