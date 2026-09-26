@@ -18,6 +18,7 @@ REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip() or os.geten
 STANDARD_REDIS_URL = os.getenv("REDIS_URL", "").strip()
 _redis_client = None
 QSTASH_TOKEN = os.getenv("QSTASH_TOKEN", "").strip()
+QSTASH_BASE_URL = os.getenv("QSTASH_URL", "").strip().rstrip("/") or "https://qstash.upstash.io"
 SCANNER_SECRET = os.getenv("SCANNER_SECRET", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SCAN_CRON = os.getenv("SCAN_CRON", "*/2 * * * *").strip()
@@ -265,7 +266,7 @@ def trigger_qstash_scan() -> bool:
         return False
 
     destination = f"{base}/api/scan"
-    url = f"https://qstash.upstash.io/v2/publish/{quote(destination, safe='')}"
+    url = f"{QSTASH_BASE_URL}/v2/publish/{destination}"
     r = requests.post(
         url,
         headers={
@@ -296,7 +297,7 @@ def ensure_qstash_schedule() -> dict[str, Any]:
 
     destination = f"{base}/api/scan"
     schedule_id = os.getenv("QSTASH_SCHEDULE_ID", "solana-memecoin-scanner").strip()
-    url = f"https://qstash.upstash.io/v2/schedules/{quote(destination, safe='')}"
+    url = f"{QSTASH_BASE_URL}/v2/schedules/{destination}"
     r = requests.post(
         url,
         headers={
