@@ -34,6 +34,7 @@ UA = (
 )
 PUMP_API = "https://frontend-api-v3.pump.fun"
 DS_API = "https://api.dexscreener.com"
+GECKO_API = "https://api.geckoterminal.com/api/v2"
 RUGCHECK_NEW = "https://api.rugcheck.xyz/v1/stats/new_tokens"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 STATE_FILE = Path("alerted.json")
@@ -49,6 +50,7 @@ MIN_SCORE = int(os.getenv("MIN_SCORE", "55"))
 REQUIRE_STILL_ON_CURVE = os.getenv("REQUIRE_STILL_ON_CURVE", "true").lower() == "true"
 REQUIRE_SOCIALS = os.getenv("REQUIRE_SOCIALS", "false").lower() == "true"
 ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "180"))
+GECKO_NEW_POOL_PAGES = max(1, min(3, int(os.getenv("GECKO_NEW_POOL_PAGES", "2"))))
 GRADUATION_SOL = 85.0
 
 
@@ -174,6 +176,24 @@ def rugcheck_new() -> list[dict[str, Any]]:
         return []
 
 
+def gecko_new_pools() -> list[dict[str, Any]]:
+    """Fetch newly created Solana pools from GeckoTerminal's public API."""
+    rows: list[dict[str, Any]] = []
+    for page in range(1, GECKO_NEW_POOL_PAGES + 1):
+        try:
+            data = http_get(
+                f"{GECKO_API}/networks/solana/new_pools?page={page}",
+                timeout=12,
+            )
+            page_rows = data.get("data") if isinstance(data, dict) else []
+            if isinstance(page_rows, list):
+                rows.extend(page_rows)
+        except Exception as exc:
+            log.warning("geckoterminal new pools page %s failed: %s", page, exc)
+            break
+    return rows
+
+
 def rugcheck_score(mint: str) -> int | None:
     try:
         data = http_get(RUGCHECK_REPORT.format(mint=mint), timeout=10)
@@ -256,6 +276,57 @@ def from_rugcheck(raw: dict[str, Any]) -> Token:
         symbol=str(raw.get("symbol") or "?"),
         source="rugcheck-new",
         created_ms=created_ms,
+    )
+
+
+def from_gecko_pool(raw: dict[str, Any]) -> Token:
+    attrs = raw.get("attributes") or {}
+    rel = raw.get("relationships") or {}
+    base_ref = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
+    mint = str(base_ref)
+    if mint.startswith("solana_"):
+        mint = mint[len("solana_"):]
+
+    display_name = str(attrs.get("name") or "?")
+    base_name = display_name.split("/", 1)[0].strip() or "?"
+
+    created_ms = 0
+    created = attrs.get("pool_created_at") or ""
+    if created:
+        try:
+            dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            created_ms = int(dt.timestamp() * 1000)
+        except (TypeError, ValueError):
+            pass
+
+    def num(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    tx = attrs.get("transactions") or {}
+    h1_tx = tx.get("h1") or {}
+    volume = attrs.get("volume_usd") or {}
+    change = attrs.get("price_change_percentage") or {}
+
+    return Token(
+        mint=mint,
+        name=base_name,
+        symbol=base_name,
+        source="gecko-new",
+        usd_mcap=num(attrs.get("market_cap_usd") or attrs.get("fdv_usd")),
+        created_ms=created_ms,
+        volume_h1=num(volume.get("h1")),
+        liquidity_usd=num(attrs.get("reserve_in_usd")),
+        price_change_h1=num(change.get("h1")),
+        buys_h1=int(num(h1_tx.get("buys"))),
+        sells_h1=int(num(h1_tx.get("sells"))),
+        pair_url=(
+            f"https://www.geckoterminal.com/solana/pools/{attrs.get('address')}"
+            if attrs.get("address")
+            else ""
+        ),
     )
 
 
@@ -433,28 +504,24 @@ HELP = (
 
 def collect_candidates() -> list[Token]:
     found: dict[str, Token] = {}
-    for sort, label in (
-        ("created_timestamp", "pump-new"),
-        ("last_trade_timestamp", "pump-hot"),
-        ("last_reply", "pump-social"),
-        ("market_cap", "pump-mcap"),
-    ):
-        try:
-            rows = pump_list(sort, limit=40)
-            log.info("fetched %s %s tokens", len(rows), label)
-            for raw in rows:
-                tok = from_pump(raw, label)
-                if tok.mint and tok.mint not in found:
-                    found[tok.mint] = tok
-        except Exception as exc:
-            log.warning("%s fetch failed: %s", label, exc)
-            time.sleep(1)
-    for raw in rugcheck_new():
+
+    # Primary source: public, keyless Solana new-pool discovery.
+    gecko_rows = gecko_new_pools()
+    log.info("fetched %s GeckoTerminal new pools", len(gecko_rows))
+    for raw in gecko_rows:
+        tok = from_gecko_pool(raw)
+        if tok.mint and tok.mint not in found:
+            found[tok.mint] = tok
+
+    # Secondary source: RugCheck's recently detected Solana tokens.
+    rug_rows = rugcheck_new()
+    log.info("fetched %s RugCheck new tokens", len(rug_rows))
+    for raw in rug_rows:
         tok = from_rugcheck(raw)
         if tok.mint and tok.mint not in found:
             found[tok.mint] = tok
-    return list(found.values())
 
+    return list(found.values())
 
 def scan_once(tg: Telegram, state: dict[str, float]) -> dict[str, int]:
     stats = {"seen": 0, "filtered": 0, "scored": 0, "alerted": 0}
