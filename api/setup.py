@@ -50,7 +50,7 @@ def _create_qstash_schedule(base: str) -> dict:
         return {"configured": False, "reason": "SCANNER_SECRET missing"}
 
     destination = f"{base}/api/scan"
-    url = f"https://qstash.upstash.io/v2/schedules/{quote(destination, safe='')}"
+    url = f"{serverless.QSTASH_BASE_URL}/v2/schedules/{destination}"
     schedule_id = os.getenv("QSTASH_SCHEDULE_ID", "solana-memecoin-scanner").strip()
     r = requests.post(
         url,
