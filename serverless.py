@@ -31,6 +31,7 @@ LOCK_KEY = "sol-meme:scan-lock"
 PERFORMANCE_KEY = "sol-meme:performance"
 PERFORMANCE_REFRESH_KEY = "sol-meme:performance:last-refresh"
 SIGNAL_SNAPSHOT_KEY = "sol-meme:early-signal-snapshots"
+DEEP_DD_CACHE_KEY = "sol-meme:deep-dd-cache"
 PERFORMANCE_REFRESH_SECONDS = max(120, int(os.getenv("PERFORMANCE_REFRESH_SECONDS", "300")))
 REPORT_TZ_OFFSET_HOURS = int(os.getenv("REPORT_TZ_OFFSET_HOURS", "1"))
 
@@ -218,6 +219,9 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     signal_snapshots = load_json(SIGNAL_SNAPSHOT_KEY, {})
     if not isinstance(signal_snapshots, dict):
         signal_snapshots = {}
+    deep_dd_cache = load_json(DEEP_DD_CACHE_KEY, {})
+    if not isinstance(deep_dd_cache, dict):
+        deep_dd_cache = {}
 
     survivors: list[bot.Token] = []
     for token in tokens:
@@ -317,13 +321,24 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             and token.liquidity_usd < prev_liq * 0.80
         )
 
-        regular_alert = regular_candidate and structural_ok and momentum_ok and liquidity_stable
-        early_alert = early_candidate and structural_ok and momentum_ok and liquidity_stable
+        base_safe = structural_ok and momentum_ok and liquidity_stable
+        if base_safe:
+            cached = deep_dd_cache.get(token.mint) or {}
+            cached_ts = float(cached.get("ts") or 0) if isinstance(cached, dict) else 0
+            dd_data = cached.get("data") if isinstance(cached, dict) and now - cached_ts <= 300 else None
+            if not isinstance(dd_data, dict):
+                dd_data = bot.solana_tracker_due_diligence(token)
+                deep_dd_cache[token.mint] = {"ts": int(now), "data": dd_data}
+            bot.apply_deep_dd(token, dd_data)
+        deep_dd_ok = bot.deep_due_diligence_ok(token)
+
+        regular_alert = regular_candidate and base_safe and deep_dd_ok
+        early_alert = early_candidate and base_safe and deep_dd_ok
 
         if not (regular_alert or early_alert):
             bot.log.info(
                 "blocked %s safety structural=%s momentum=%s liq_stable=%s "
-                "rug=%s top10=%.1f max_holder=%.1f lp_lock=%s",
+                "rug=%s top10=%.1f max_holder=%.1f lp_lock=%s deep_dd=%s dd_reasons=%s",
                 token.mint,
                 structural_ok,
                 momentum_ok,
@@ -332,6 +347,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
                 token.top10_pct,
                 token.largest_holder_pct,
                 token.lp_locked_pct,
+                token.deep_dd_checked,
+                token.deep_dd_reasons,
             )
             continue
 
@@ -368,6 +385,12 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         if isinstance(snap, dict) and float(snap.get("ts") or 0) >= signal_cutoff
     }
     save_json(SIGNAL_SNAPSHOT_KEY, signal_snapshots, ttl_seconds=10800)
+    dd_cutoff = now - 1800
+    deep_dd_cache = {
+        mint: row for mint, row in deep_dd_cache.items()
+        if isinstance(row, dict) and float(row.get("ts") or 0) >= dd_cutoff
+    }
+    save_json(DEEP_DD_CACHE_KEY, deep_dd_cache, ttl_seconds=1800)
 
     save_alert_state(state)
     save_last_stats(stats)
