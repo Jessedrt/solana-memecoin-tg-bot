@@ -286,23 +286,55 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         )
         exit_ok = bot.has_exit_capacity(token)
 
-        # Risk-first rule: unknown core data is unsafe, and a signal that cannot
-        # support a reasonable $1K exit is not sent as an actionable alert.
-        regular_alert = (
+        # Cheap gates first. Only coins that could be alerted receive the
+        # heavier full RugCheck structural report.
+        regular_candidate = (
             token.score >= bot.MIN_SCORE
             and core_checked
             and exit_ok
             and token.rug_score <= 40
         )
-        early_alert = (
+        early_candidate = (
             token.early_score >= bot.PRE_PUMP_MIN_SCORE
             and core_checked
             and exit_ok
             and token.rug_score <= 30
             and token.price_change_m5 < 80
         )
-        if not (regular_alert or early_alert):
+        if not (regular_candidate or early_candidate):
             continue
+
+        if not bot.rugcheck_full_enrich(token):
+            bot.log.info("blocked %s: full RugCheck unavailable", token.mint)
+            continue
+
+        structural_ok = bot.structural_safety_ok(token)
+        momentum_ok = bot.momentum_not_extended(token)
+
+        prev_liq = float(previous.get("liquidity_usd") or 0)
+        liquidity_stable = not (
+            prev_liq > 0
+            and token.liquidity_usd < prev_liq * 0.80
+        )
+
+        regular_alert = regular_candidate and structural_ok and momentum_ok and liquidity_stable
+        early_alert = early_candidate and structural_ok and momentum_ok and liquidity_stable
+
+        if not (regular_alert or early_alert):
+            bot.log.info(
+                "blocked %s safety structural=%s momentum=%s liq_stable=%s "
+                "rug=%s top10=%.1f max_holder=%.1f lp_lock=%s",
+                token.mint,
+                structural_ok,
+                momentum_ok,
+                liquidity_stable,
+                token.rug_score,
+                token.top10_pct,
+                token.largest_holder_pct,
+                token.lp_locked_pct,
+            )
+            continue
+
         if token.source == "rugcheck-new" and token.usd_mcap < bot.MIN_MCAP_USD and token.score < 70 and not early_alert:
             continue
 
