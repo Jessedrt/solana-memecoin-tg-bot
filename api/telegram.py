@@ -61,10 +61,8 @@ class handler(BaseHTTPRequestHandler):
                 serverless.register_chat_id(chat_id)
 
             elif cmd == "/scan":
+                # Manual scans are silent too; only a qualifying coin may send.
                 serverless.run_scan(require_durable_state=True)
-
-            elif cmd == "/performance":
-                tg.send(serverless.today_performance_text(), chat_id=chat_id)
 
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
@@ -72,8 +70,9 @@ class handler(BaseHTTPRequestHandler):
                     bot.log.warning("Could not enable schedule: %s", result.get("reason", "unknown"))
 
             else:
-                # Strict alert-only mode: all other Telegram commands are ignored silently.
-                bot.log.info("Ignored Telegram command in strict alert-only mode: %s", cmd)
+                # Absolute alert-only mode: no performance/status/help/ack messages.
+                # Performance is still tracked internally in Redis.
+                bot.log.info("Ignored Telegram command in coin-alert-only mode: %s", cmd)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
