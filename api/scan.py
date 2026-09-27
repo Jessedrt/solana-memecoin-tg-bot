@@ -39,7 +39,7 @@ class handler(BaseHTTPRequestHandler):
             self._reply(401, {"ok": False, "error": "unauthorized"})
             return
         try:
-            stats = serverless.run_scan(require_durable_state=True)
+            stats = serverless.run_scan(require_durable_state=True, respect_enabled=True)
             bot.log.info("scan complete stats=%s", stats)
             self._reply(200, {"ok": True, "stats": stats, "state": "redis"})
         except Exception as exc:
