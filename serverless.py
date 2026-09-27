@@ -657,6 +657,45 @@ def _record_multiple(rec: dict[str, Any], current_mcap: float, current_price: fl
     return multiple
 
 
+def _executable_snapshot(
+    rec: dict[str, Any],
+    current_mcap: float,
+    current_price: float,
+    current_liquidity: float,
+    stake: float,
+) -> dict[str, float]:
+    """Estimate a round trip from alert-time entry through the current exit."""
+    chart_multiple = _record_multiple(rec, current_mcap, current_price)
+    entry_liquidity = float(rec.get("entry_liquidity") or 0)
+    if chart_multiple <= 0 or entry_liquidity <= 0 or current_liquidity <= 0 or stake <= 0:
+        return {
+            "multiple": 0.0,
+            "marked_value": 0.0,
+            "proceeds": 0.0,
+            "entry_impact_pct": 100.0,
+            "exit_impact_pct": 100.0,
+        }
+
+    # Constant-product approximation: half of reported USD liquidity is the
+    # quote reserve. Entry slippage reduces how much token the original stake
+    # actually acquired relative to the pre-trade spot price.
+    entry_quote = entry_liquidity / 2.0
+    entry_fill = entry_quote / (entry_quote + stake)
+    entry_impact = max(0.0, (1.0 - entry_fill) * 100.0)
+
+    # Value the acquired tokens at the current spot, then estimate liquidating
+    # that ENTIRE position at current liquidity.
+    marked_value = stake * entry_fill * chart_multiple
+    proceeds, exit_impact = bot.dex_exit_estimate(current_liquidity, marked_value)
+    return {
+        "multiple": (proceeds / stake) if proceeds > 0 else 0.0,
+        "marked_value": marked_value,
+        "proceeds": proceeds,
+        "entry_impact_pct": entry_impact,
+        "exit_impact_pct": exit_impact,
+    }
+
+
 def refresh_performance(force: bool = False) -> dict[str, int]:
     stats = {"tracked": 0, "checked": 0, "two_x": 0}
     if not has_redis():
@@ -700,13 +739,22 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
             rec.setdefault("snapshots", []).append({"ts": int(now), "price": current_price, "mcap": current_mcap, "liquidity": float(probe.liquidity_usd or 0), "volume_h1": float(probe.volume_h1 or 0)})
             rec["snapshots"] = rec["snapshots"][-288:]
             for size in (100, 1000, 10000):
-                proceeds, impact = bot.dex_exit_estimate(float(probe.liquidity_usd or 0), float(size))
-                entry_price = float(rec.get("entry_price") or 0)
-                gross_multiple = (current_price / entry_price) if entry_price > 0 and current_price > 0 else 0.0
-                executable = gross_multiple * (proceeds / float(size)) if proceeds > 0 else 0.0
+                executable = _executable_snapshot(
+                    rec,
+                    current_mcap,
+                    current_price,
+                    float(probe.liquidity_usd or 0),
+                    float(size),
+                )
                 key = f"executable_peak_{size}"
-                rec[key] = max(float(rec.get(key) or 0), executable)
-                rec[f"exit_{size}"] = {"proceeds": proceeds, "impact_pct": impact, "ts": int(now)}
+                rec[key] = max(float(rec.get(key) or 0), executable["multiple"])
+                rec[f"exit_{size}"] = {
+                    "marked_value": executable["marked_value"],
+                    "proceeds": executable["proceeds"],
+                    "entry_impact_pct": executable["entry_impact_pct"],
+                    "impact_pct": executable["exit_impact_pct"],
+                    "ts": int(now),
+                }
             rec["peak_liquidity"] = max(float(rec.get("peak_liquidity") or 0), float(probe.liquidity_usd or 0))
             # Classification must use the chart multiple from THIS snapshot; peak_multiple
             # is updated just below, after executable metrics are captured.
