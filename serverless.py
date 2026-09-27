@@ -397,7 +397,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         if not (regular_candidate or early_candidate):
             bot.log.info(
                 "near-miss %s score=%s early=%s rug=%s exit=%s core=%s "
-                "mcap=%.0f liq=%.0f h1=%.1f m5=%.1f b/s=%.2f",
+                "mcap=%.0f liq=%.0f h1=%.1f m5=%.1f b/s=%.2f "
+                "src=%s dex=%s age_ms=%s complete=%s pump=%s pump_checked=%s real_sol=%.2f",
                 token.mint,
                 token.score,
                 token.early_score,
@@ -409,6 +410,13 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
                 token.price_change_h1,
                 token.price_change_m5,
                 (token.buys_h1 / max(token.sells_h1, 1)) if token.buys_h1 else 0,
+                token.source,
+                token.dex_id,
+                token.created_ms,
+                token.complete,
+                bot.is_pump_token(token),
+                token.pump_checked,
+                token.real_sol,
             )
             continue
         stats["candidates"] += 1
