@@ -22,7 +22,7 @@ QSTASH_BASE_URL = os.getenv("QSTASH_URL", "").strip().rstrip("/") or "https://qs
 SCANNER_SECRET = os.getenv("SCANNER_SECRET", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SCAN_CRON = os.getenv("SCAN_CRON", "*/2 * * * *").strip()
-ENRICH_LIMIT = max(1, min(20, int(os.getenv("MAX_TOKENS_TO_ENRICH", "10"))))
+ENRICH_LIMIT = max(1, min(20, int(os.getenv("MAX_TOKENS_TO_ENRICH", "18"))))
 
 STATE_KEY = "sol-meme:alert-state"
 CHAT_KEY = "sol-meme:chat-id"
@@ -210,8 +210,67 @@ def scanner_status_text(state_count: int, stats: dict[str, int]) -> str:
     )
 
 
+def _candidate_priority(t: bot.Token) -> float:
+    """Cheap pre-enrichment ranking so scarce API slots go to stronger setups."""
+    score = 0.0
+    age = t.age_min
+    if t.created_ms:
+        if 2 <= age <= 25:
+            score += 24
+        elif age <= 60:
+            score += 14
+        elif age <= bot.MAX_AGE_MINUTES:
+            score += 5
+
+    if 7000 <= t.usd_mcap <= 80000:
+        score += 22
+    elif 4000 <= t.usd_mcap <= 150000:
+        score += 10
+
+    if t.volume_h1 >= 20000:
+        score += 18
+    elif t.volume_h1 >= 5000:
+        score += 12
+    elif t.volume_h1 >= 1690:
+        score += 6
+
+    if t.liquidity_usd >= 15000:
+        score += 14
+    elif t.liquidity_usd >= 7000:
+        score += 8
+
+    if t.buys_h1 and t.sells_h1:
+        ratio = t.buys_h1 / max(t.sells_h1, 1)
+        if ratio >= 1.5:
+            score += 14
+        elif ratio >= 1.1:
+            score += 7
+        elif ratio < 0.9:
+            score -= 10
+
+    if t.twitter or t.telegram or t.website:
+        score += 6
+    if 0 < t.price_change_h1 <= 120:
+        score += 5
+    elif t.price_change_h1 >= 250:
+        score -= 20
+
+    # Replies are useful on Pump, but should not dominate multi-source discovery.
+    score += min(max(t.replies, 0), 25) * 0.4
+    return score
+
+
 def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
-    stats = {"seen": 0, "filtered": 0, "scored": 0, "alerted": 0}
+    stats = {
+        "seen": 0,
+        "filtered": 0,
+        "enriched": 0,
+        "scored": 0,
+        "candidates": 0,
+        "structural_pass": 0,
+        "deep_dd_pass": 0,
+        "alerted": 0,
+    }
     tokens = bot.collect_candidates()
     stats["seen"] = len(tokens)
     now = time.time()
@@ -232,7 +291,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         survivors.append(token)
 
     stats["filtered"] = len(survivors)
-    survivors.sort(key=lambda x: (x.replies, x.usd_mcap), reverse=True)
+    survivors.sort(key=_candidate_priority, reverse=True)
 
     # Reserve part of each pass for independent DexScreener discoveries so
     # Gecko/RugCheck candidates cannot consume every enrichment slot.
@@ -244,8 +303,16 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         used = {t.mint for t in enrich_batch}
         enrich_batch.extend([t for t in survivors if t.mint not in used][: ENRICH_LIMIT - len(enrich_batch)])
 
+    bot.log.info(
+        "analysis coverage survivors=%s enrich_batch=%s limit=%s",
+        len(survivors),
+        len(enrich_batch),
+        ENRICH_LIMIT,
+    )
+
     for token in enrich_batch:
         bot.dexscreener_enrich(token)
+        stats["enriched"] += 1
         if bot.is_pump_token(token):
             bot.pump_enrich(token)
 
@@ -307,6 +374,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         )
         if not (regular_candidate or early_candidate):
             continue
+        stats["candidates"] += 1
 
         if not bot.rugcheck_full_enrich(token):
             bot.log.info("blocked %s: full RugCheck unavailable", token.mint)
@@ -323,6 +391,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
 
         base_safe = structural_ok and momentum_ok and liquidity_stable
         if base_safe:
+            stats["structural_pass"] += 1
             cached = deep_dd_cache.get(token.mint) or {}
             cached_ts = float(cached.get("ts") or 0) if isinstance(cached, dict) else 0
             dd_data = cached.get("data") if isinstance(cached, dict) and now - cached_ts <= 300 else None
@@ -331,6 +400,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
                 deep_dd_cache[token.mint] = {"ts": int(now), "data": dd_data}
             bot.apply_deep_dd(token, dd_data)
         deep_dd_ok = bot.deep_due_diligence_ok(token)
+        if deep_dd_ok:
+            stats["deep_dd_pass"] += 1
 
         regular_alert = regular_candidate and base_safe and deep_dd_ok
         early_alert = early_candidate and base_safe and deep_dd_ok
