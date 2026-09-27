@@ -274,15 +274,45 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         "fail_score": 0,
         "fail_rug": 0,
         "fail_early": 0,
+        "fail_acceleration": 0,
+        "fail_late_move": 0,
         "alerted": 0,
     }
     tokens = bot.collect_candidates()
-    stats["seen"] = len(tokens)
     now = time.time()
     cooldown = bot.ALERT_COOLDOWN_MINUTES * 60
     signal_snapshots = load_json(SIGNAL_SNAPSHOT_KEY, {})
     if not isinstance(signal_snapshots, dict):
         signal_snapshots = {}
+
+    # Keep promising first sightings alive for the next observation. Discovery
+    # feeds rotate quickly, so relying on them to return the same mint can make
+    # scan-to-scan acceleration impossible to confirm.
+    known_mints = {t.mint for t in tokens if t.mint}
+    for mint, snap in signal_snapshots.items():
+        if mint in known_mints or not isinstance(snap, dict):
+            continue
+        snap_ts = float(snap.get("ts") or 0)
+        if snap_ts <= 0 or now - snap_ts > 900:
+            continue
+        if now - state.get(mint, 0) < cooldown:
+            continue
+        watch = bot.Token(
+            mint=mint,
+            source="dexscreener-watchlist",
+            created_ms=int(snap.get("created_ms") or 0),
+            usd_mcap=float(snap.get("usd_mcap") or 0),
+            liquidity_usd=float(snap.get("liquidity_usd") or 0),
+            volume_h1=float(snap.get("volume_h1") or 0),
+            price_change_h1=float(snap.get("price_change_h1") or 0),
+            buys_h1=int(snap.get("buys_h1") or 0),
+            sells_h1=int(snap.get("sells_h1") or 0),
+            dex_id=str(snap.get("dex_id") or ""),
+        )
+        tokens.append(watch)
+        known_mints.add(mint)
+
+    stats["seen"] = len(tokens)
     deep_dd_cache = load_json(DEEP_DD_CACHE_KEY, {})
     if not isinstance(deep_dd_cache, dict):
         deep_dd_cache = {}
@@ -298,15 +328,30 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     stats["filtered"] = len(survivors)
     survivors.sort(key=_candidate_priority, reverse=True)
 
-    # Reserve part of each pass for independent DexScreener discoveries so
-    # Gecko/RugCheck candidates cannot consume every enrichment slot.
-    ds_candidates = [t for t in survivors if t.source.startswith("dexscreener-")]
+    # Reserve slots for recent observations first. Without this, a promising
+    # first sighting can disappear from rotating discovery feeds before we can
+    # confirm acceleration on the next scan.
+    watch_candidates = [t for t in survivors if t.source == "dexscreener-watchlist"]
+    ds_candidates = [
+        t for t in survivors
+        if t.source.startswith("dexscreener-") and t.source != "dexscreener-watchlist"
+    ]
     other_candidates = [t for t in survivors if not t.source.startswith("dexscreener-")]
-    ds_slots = max(2, ENRICH_LIMIT // 3)
-    enrich_batch = other_candidates[: max(0, ENRICH_LIMIT - ds_slots)] + ds_candidates[:ds_slots]
+
+    watch_slots = min(max(4, ENRICH_LIMIT // 3), len(watch_candidates))
+    remaining = max(0, ENRICH_LIMIT - watch_slots)
+    ds_slots = min(max(2, remaining // 3), len(ds_candidates))
+
+    enrich_batch = (
+        watch_candidates[:watch_slots]
+        + other_candidates[: max(0, remaining - ds_slots)]
+        + ds_candidates[:ds_slots]
+    )
     if len(enrich_batch) < ENRICH_LIMIT:
         used = {t.mint for t in enrich_batch}
-        enrich_batch.extend([t for t in survivors if t.mint not in used][: ENRICH_LIMIT - len(enrich_batch)])
+        enrich_batch.extend(
+            [t for t in survivors if t.mint not in used][: ENRICH_LIMIT - len(enrich_batch)]
+        )
 
     bot.log.info(
         "analysis coverage survivors=%s enrich_batch=%s limit=%s",
@@ -345,6 +390,13 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             "buys_m5": int(token.buys_m5 or 0),
             "sells_m5": int(token.sells_m5 or 0),
             "price_change_m5": float(token.price_change_m5 or 0),
+            "created_ms": int(token.created_ms or 0),
+            "source": token.source,
+            "dex_id": token.dex_id,
+            "volume_h1": float(token.volume_h1 or 0),
+            "price_change_h1": float(token.price_change_h1 or 0),
+            "buys_h1": int(token.buys_h1 or 0),
+            "sells_h1": int(token.sells_h1 or 0),
         }
 
         pump_curve_ok = (
@@ -364,23 +416,48 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         )
         exit_ok = bot.has_exit_capacity(token)
 
-        # Cheap gates first. Only coins that could be alerted receive the
-        # heavier full RugCheck structural report.
-        rug_regular_ok = token.rug_score is None or token.rug_score <= 40
+        # Pre-move mode: ordinary momentum alerts are disabled. A coin must
+        # have a recent prior observation and show fresh acceleration while the
+        # price is still inside the early window.
         rug_early_ok = token.rug_score is None or token.rug_score <= 30
+        prev_ts = float(previous.get("ts") or 0)
+        observation_gap = now - prev_ts if prev_ts > 0 else 0
+        recent_previous = 30 <= observation_gap <= 600
 
-        regular_candidate = (
-            token.score >= bot.MIN_SCORE
-            and core_checked
-            and exit_ok
-            and rug_regular_ok
+        prev_vol = float(previous.get("volume_m5") or 0)
+        prev_buys = int(previous.get("buys_m5") or 0)
+        volume_accelerating = (
+            recent_previous
+            and prev_vol >= 500
+            and token.volume_m5 >= max(prev_vol * 1.20, prev_vol + 500)
         )
+        buys_accelerating = (
+            recent_previous
+            and prev_buys >= 3
+            and token.buys_m5 >= max(prev_buys + 2, int(prev_buys * 1.15))
+        )
+        acceleration_confirmed = volume_accelerating or buys_accelerating
+
+        buy_sell_m5 = token.buys_m5 / max(token.sells_m5, 1) if token.buys_m5 else 0
+        early_price_window = (
+            -5 <= token.price_change_m5 <= 30
+            and token.price_change_h1 < 90
+        )
+        early_activity = (
+            token.volume_m5 >= 800
+            and token.buys_m5 >= 8
+            and buy_sell_m5 >= 1.25
+        )
+
         early_candidate = (
             token.early_score >= bot.PRE_PUMP_MIN_SCORE
             and core_checked
             and exit_ok
             and rug_early_ok
-            and token.price_change_m5 < 80
+            and recent_previous
+            and acceleration_confirmed
+            and early_price_window
+            and early_activity
         )
         if not core_checked:
             stats["fail_core"] += 1
@@ -392,8 +469,12 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             stats["fail_rug"] += 1
         if token.early_score < bot.PRE_PUMP_MIN_SCORE:
             stats["fail_early"] += 1
+        if not recent_previous or not acceleration_confirmed:
+            stats["fail_acceleration"] += 1
+        if not early_price_window:
+            stats["fail_late_move"] += 1
 
-        if not (regular_candidate or early_candidate):
+        if not early_candidate:
             bot.log.info(
                 "near-miss %s score=%s early=%s rug=%s exit=%s core=%s "
                 "mcap=%.0f liq=%.0f h1=%.1f m5=%.1f b/s=%.2f "
@@ -455,10 +536,9 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         if deep_dd_ok:
             stats["deep_dd_pass"] += 1
 
-        regular_alert = regular_candidate and base_safe and deep_dd_ok
         early_alert = early_candidate and base_safe and deep_dd_ok
 
-        if not (regular_alert or early_alert):
+        if not early_alert:
             bot.log.info(
                 "blocked %s safety structural=%s momentum=%s liq_stable=%s "
                 "rug=%s rug_full=%s top10=%.1f max_holder=%.1f lp_lock=%s "
@@ -477,9 +557,6 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
                 token.deep_dd_checked,
                 token.deep_dd_reasons,
             )
-            continue
-
-        if token.source == "rugcheck-new" and token.usd_mcap < bot.MIN_MCAP_USD and token.score < 70 and not early_alert:
             continue
 
         # Use sendMessage so Telegram can render the Pump/Dex web preview.
