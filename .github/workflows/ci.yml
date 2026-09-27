@@ -67,3 +67,80 @@ jobs:
           assert not bot.structural_safety_ok(t)
           print(rendered)
           PY
+
+      - name: Regression test scanner controls and executable math
+        run: |
+          python - <<'PY'
+          import serverless
+
+          # A $100 position at 5x must sell the full current position,
+          # not estimate a $100 exit and multiply it by five.
+          rec = {
+              "entry_price": 1.0,
+              "entry_mcap": 10000.0,
+              "entry_liquidity": 2000.0,
+          }
+          snap = serverless._executable_snapshot(
+              rec,
+              current_mcap=50000.0,
+              current_price=5.0,
+              current_liquidity=2000.0,
+              stake=100.0,
+          )
+          assert 450 < snap["marked_value"] < 460
+          assert 3.0 < snap["multiple"] < 3.3
+          assert snap["multiple"] < 5.0
+
+          # An already queued scheduled delivery must be ignored when OFF.
+          original_enabled = serverless.scanner_enabled
+          serverless.scanner_enabled = lambda: False
+          skipped = serverless.run_scan(require_durable_state=True, respect_enabled=True)
+          assert skipped.get("disabled") == 1
+          serverless.scanner_enabled = original_enabled
+
+          # /off deletes both the configured schedule ID and any stale schedule
+          # still targeting Pulse's production scan endpoint.
+          class Resp:
+              def __init__(self, status_code=200, payload=None):
+                  self.status_code = status_code
+                  self._payload = payload
+              def raise_for_status(self):
+                  if self.status_code >= 400:
+                      raise RuntimeError(self.status_code)
+              def json(self):
+                  return self._payload
+
+          deleted = []
+          states = []
+          old_token = serverless.QSTASH_TOKEN
+          old_base = serverless.QSTASH_BASE_URL
+          old_prod = serverless.production_base_url
+          old_get = serverless.requests.get
+          old_delete = serverless.requests.delete
+          old_set = serverless.set_scanner_enabled
+          try:
+              serverless.QSTASH_TOKEN = "test-token"
+              serverless.QSTASH_BASE_URL = "https://qstash.test"
+              serverless.production_base_url = lambda: "https://pulse.test"
+              serverless.requests.get = lambda *a, **k: Resp(200, [
+                  {"scheduleId": "stale-schedule", "destination": "https://pulse.test/api/scan"}
+              ])
+              def fake_delete(url, **kwargs):
+                  deleted.append(url)
+                  return Resp(204, None)
+              serverless.requests.delete = fake_delete
+              serverless.set_scanner_enabled = lambda enabled: states.append(enabled)
+
+              result = serverless.delete_qstash_schedule()
+              assert result["disabled"] is True
+              assert states == [False]
+              assert any("solana-memecoin-scanner" in x for x in deleted)
+              assert any("stale-schedule" in x for x in deleted)
+          finally:
+              serverless.QSTASH_TOKEN = old_token
+              serverless.QSTASH_BASE_URL = old_base
+              serverless.production_base_url = old_prod
+              serverless.requests.get = old_get
+              serverless.requests.delete = old_delete
+              serverless.set_scanner_enabled = old_set
+          PY
