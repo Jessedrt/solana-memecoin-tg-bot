@@ -27,6 +27,7 @@ ENRICH_LIMIT = max(1, min(20, int(os.getenv("MAX_TOKENS_TO_ENRICH", "10"))))
 STATE_KEY = "sol-meme:alert-state"
 CHAT_KEY = "sol-meme:chat-id"
 STATS_KEY = "sol-meme:last-stats"
+SCANNER_ENABLED_KEY = "sol-meme:scanner-enabled"
 LOCK_KEY = "sol-meme:scan-lock"
 PERFORMANCE_KEY = "sol-meme:performance"
 PERFORMANCE_REFRESH_KEY = "sol-meme:performance:last-refresh"
@@ -191,16 +192,33 @@ def production_base_url() -> str:
     return f"https://{host.rstrip('/')}"
 
 
+def set_scanner_enabled(enabled: bool) -> None:
+    if has_redis():
+        redis_command("SET", SCANNER_ENABLED_KEY, "1" if enabled else "0")
+
+def scanner_enabled() -> bool:
+    if not has_redis():
+        return False
+    try:
+        return str(redis_command("GET", SCANNER_ENABLED_KEY) or "0") == "1"
+    except Exception:
+        return False
+
 def scanner_status_text(state_count: int, stats: dict[str, int]) -> str:
     backend = "Redis ✅" if has_redis() else "stateless ⚠️"
+    enabled = "ON 🟢" if scanner_enabled() else "OFF 🔴"
+    finished = int(stats.get("finished_at", 0) or 0)
+    age = max(0, int(time.time()) - finished) if finished else 0
     return (
-        "Scanner status\n"
+        "🟢 PULSE Scanner\n"
         f"• age ≤ {bot.MAX_AGE_MINUTES}m\n"
         f"• mcap {bot.fmt_usd(bot.MIN_MCAP_USD)}–{bot.fmt_usd(bot.MAX_MCAP_USD)}\n"
         f"• min replies {bot.MIN_REPLIES}\n"
         f"• min score {bot.MIN_SCORE}\n"
         f"• still on curve: {bot.REQUIRE_STILL_ON_CURVE}\n"
+        f"• auto scan: {enabled}\n"
         f"• scheduler: {SCAN_CRON}\n"
+        f"• last scan: {age}s ago\n"
         f"• state: {backend}\n"
         f"Last scan: seen {stats.get('seen', 0)}, "
         f"passed {stats.get('filtered', 0)}, "
@@ -541,6 +559,13 @@ def track_alert(token: bot.Token, alerted_at: float | None = None) -> None:
         "last_mcap": entry_mcap,
         "last_price": entry_price,
         "last_checked_at": int(alerted_at),
+        "entry_liquidity": float(token.liquidity_usd or 0),
+        "peak_liquidity": float(token.liquidity_usd or 0),
+        "snapshots": [],
+        "executable_peak_100": 0.0,
+        "executable_peak_1000": 0.0,
+        "executable_peak_10000": 0.0,
+        "classification": "INSUFFICIENT_DATA",
     }
     save_performance(data)
 
@@ -595,6 +620,24 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
             rec["last_mcap"] = current_mcap
             rec["last_price"] = current_price
             rec["last_checked_at"] = int(now)
+            rec["last_liquidity"] = float(probe.liquidity_usd or 0)
+            rec.setdefault("snapshots", []).append({"ts": int(now), "price": current_price, "mcap": current_mcap, "liquidity": float(probe.liquidity_usd or 0), "volume_h1": float(probe.volume_h1 or 0)})
+            rec["snapshots"] = rec["snapshots"][-288:]
+            for size in (100, 1000, 10000):
+                proceeds, impact = bot.dex_exit_estimate(float(probe.liquidity_usd or 0), float(size))
+                entry_price = float(rec.get("entry_price") or 0)
+                gross_multiple = (current_price / entry_price) if entry_price > 0 and current_price > 0 else 0.0
+                executable = gross_multiple * (proceeds / float(size)) if proceeds > 0 else 0.0
+                key = f"executable_peak_{size}"
+                rec[key] = max(float(rec.get(key) or 0), executable)
+                rec[f"exit_{size}"] = {"proceeds": proceeds, "impact_pct": impact, "ts": int(now)}
+            rec["peak_liquidity"] = max(float(rec.get("peak_liquidity") or 0), float(probe.liquidity_usd or 0))
+            if float(rec.get("executable_peak_100") or 0) >= 2:
+                rec["classification"] = "EXECUTABLE_WIN"
+            elif float(rec.get("peak_multiple") or 1) >= 2 and float(rec.get("executable_peak_100") or 0) < 2:
+                rec["classification"] = "ILLIQUID"
+            else:
+                rec["classification"] = "ACTIVE"
             rec["peak_mcap"] = max(float(rec.get("peak_mcap") or 0), current_mcap)
             rec["peak_price"] = max(float(rec.get("peak_price") or 0), current_price)
             multiple = _record_multiple(rec, current_mcap, current_price)
@@ -618,12 +661,16 @@ def format_performance_report(day: str, *, interim: bool = False) -> str:
     alerts = list((bucket.get("alerts") or {}).values())
     alerts.sort(key=lambda r: float(r.get("peak_multiple") or 0), reverse=True)
     winners = [r for r in alerts if float(r.get("peak_multiple") or 0) >= 2]
+    executable = [r for r in alerts if float(r.get("executable_peak_100") or 0) >= 2]
+    illiquid = [r for r in alerts if r.get("classification") == "ILLIQUID"]
 
     title = "📈 PULSE Performance — today" if interim else f"🏁 PULSE Daily Results — {day}"
     lines = [
         title,
         f"Alerts tracked: <b>{len(alerts)}</b>",
-        f"Reached 2x+: <b>{len(winners)}</b>",
+        f"Chart reached 2x+: <b>{len(winners)}</b>",
+        f"Executable $100 2x+: <b>{len(executable)}</b>",
+        f"Illiquid/non-executable: <b>{len(illiquid)}</b>",
     ]
     if not winners:
         lines.append("No tracked alert reached 2x yet." if interim else "No tracked alert reached 2x during the day.")
@@ -641,7 +688,8 @@ def format_performance_report(day: str, *, interim: bool = False) -> str:
         else:
             move = "price-tracked"
         lines.append(
-            f"{i}. <b>{symbol}</b> — <b>{mult:.2f}x</b> peak · {move}\n"
+            f"{i}. <b>{symbol}</b> — chart <b>{mult:.2f}x</b> · {move}\n"
+            f"$100 executable peak: <b>{float(rec.get('executable_peak_100') or 0):.2f}x</b> · {rec.get('classification', '?')}\n"
             f'<a href="https://dexscreener.com/solana/{mint}">DexScreener</a>'
         )
     return "\n".join(lines)
