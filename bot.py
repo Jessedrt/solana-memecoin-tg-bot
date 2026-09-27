@@ -38,6 +38,7 @@ DS_API = "https://api.dexscreener.com"
 GECKO_API = "https://api.geckoterminal.com/api/v2"
 RUGCHECK_NEW = "https://api.rugcheck.xyz/v1/stats/new_tokens"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
+RUGCHECK_FULL_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 STATE_FILE = Path("alerted.json")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -91,6 +92,15 @@ class Token:
     pair_url: str = ""
     dex_id: str = ""
     rug_score: int | None = None
+    rug_full_checked: bool = False
+    rugged: bool = False
+    mint_authority_active: bool = False
+    freeze_authority_active: bool = False
+    top10_pct: float = 0.0
+    largest_holder_pct: float = 0.0
+    insider_pct: float = 0.0
+    lp_locked_pct: float | None = None
+    structural_risks: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     score: int = 0
     early_score: int = 0
@@ -384,6 +394,133 @@ def rugcheck_score(mint: str) -> int | None:
     return None
 
 
+def rugcheck_full_enrich(token: Token) -> bool:
+    """Fetch RugCheck's full report and extract structural rug signals."""
+    try:
+        data = http_get(RUGCHECK_FULL_REPORT.format(mint=token.mint), timeout=12)
+    except Exception as exc:
+        log.debug("RugCheck full report failed for %s: %s", token.mint, exc)
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    token.rug_full_checked = True
+    token.rugged = bool(data.get("rugged"))
+
+    if data.get("score_normalised") is not None:
+        try:
+            token.rug_score = int(data["score_normalised"])
+        except (TypeError, ValueError):
+            pass
+
+    tok = data.get("token") or {}
+    if isinstance(tok, dict):
+        token.mint_authority_active = bool(tok.get("mintAuthority"))
+        token.freeze_authority_active = bool(tok.get("freezeAuthority"))
+
+    holders = data.get("topHolders") or []
+    pcts: list[float] = []
+    insider_pct = 0.0
+    if isinstance(holders, list):
+        for holder in holders[:10]:
+            if not isinstance(holder, dict):
+                continue
+            try:
+                pct = float(holder.get("pct") or 0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            if pct > 0:
+                pcts.append(pct)
+            if holder.get("insider"):
+                insider_pct += pct
+    token.top10_pct = sum(pcts)
+    token.largest_holder_pct = max(pcts, default=0.0)
+    token.insider_pct = insider_pct
+
+    lock_values: list[float] = []
+    summary_lock = data.get("lpLockedPct")
+    if summary_lock is not None:
+        try:
+            lock_values.append(float(summary_lock))
+        except (TypeError, ValueError):
+            pass
+    markets = data.get("markets") or []
+    if isinstance(markets, list):
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            lp = market.get("lp") or {}
+            if isinstance(lp, dict) and lp.get("lpLockedPct") is not None:
+                try:
+                    lock_values.append(float(lp.get("lpLockedPct")))
+                except (TypeError, ValueError):
+                    pass
+    token.lp_locked_pct = max(lock_values) if lock_values else None
+
+    risk_names: list[str] = []
+    for risk in data.get("risks") or []:
+        if not isinstance(risk, dict):
+            continue
+        name = str(risk.get("name") or "").strip()
+        level = str(risk.get("level") or "").lower()
+        if name and level in ("danger", "high", "critical", "warn", "warning"):
+            risk_names.append(name)
+    token.structural_risks = risk_names[:8]
+    return True
+
+
+def structural_safety_ok(token: Token) -> bool:
+    """Fail closed on structural token risks that can enable a fast rug."""
+    if not token.rug_full_checked:
+        return False
+    if token.rugged:
+        return False
+    if token.mint_authority_active or token.freeze_authority_active:
+        return False
+    if token.largest_holder_pct > 15:
+        return False
+    if token.top10_pct > 35:
+        return False
+    if token.insider_pct > 10:
+        return False
+
+    # Live Pump bonding curves are governed by curve reserves rather than DEX LP locks.
+    if not is_pump_token(token) or token.complete:
+        if token.lp_locked_pct is None:
+            return False
+        if token.lp_locked_pct < 80:
+            return False
+
+    danger_words = (
+        "low liquidity",
+        "single holder",
+        "high ownership",
+        "top 10 holders high ownership",
+        "mint authority",
+        "freeze authority",
+        "lp unlocked",
+        "liquidity not locked",
+        "rugged",
+    )
+    for risk in token.structural_risks:
+        low = risk.lower()
+        if any(word in low for word in danger_words):
+            return False
+    return True
+
+
+def momentum_not_extended(token: Token) -> bool:
+    """Reject late/hype-stage moves and visible sell pressure."""
+    if token.price_change_h1 >= 250:
+        return False
+    if token.price_change_m5 >= 80:
+        return False
+    if token.buys_h1 and token.sells_h1:
+        if token.buys_h1 / max(token.sells_h1, 1) < 1.05:
+            return False
+    return True
+
+
 def dexscreener_enrich(token: Token) -> None:
     try:
         data = http_get(f"{DS_API}/latest/dex/tokens/{token.mint}", timeout=10)
@@ -625,7 +762,10 @@ def score_token(t: Token) -> int:
     if t.liquidity_usd >= 15000:
         pts += 8
         reasons.append(f"${t.liquidity_usd:,.0f} liq")
-    if t.price_change_h1 >= 40:
+    if t.price_change_h1 >= 250:
+        pts -= 20
+        reasons.append(f"already extended +{t.price_change_h1:.0f}% 1h")
+    elif t.price_change_h1 >= 40:
         pts += 8
         reasons.append(f"+{t.price_change_h1:.0f}% 1h")
     if t.buys_h1 and t.sells_h1:
@@ -633,6 +773,9 @@ def score_token(t: Token) -> int:
         if ratio >= 1.4:
             pts += 6
             reasons.append(f"buys>sells {ratio:.1f}x")
+        elif ratio < 1.0:
+            pts -= 8
+            reasons.append(f"sell pressure {ratio:.1f}x")
     if t.rug_score is not None:
         if t.rug_score <= 20:
             pts += 6
@@ -863,6 +1006,9 @@ def format_alert(t: Token) -> str:
         "",
         "🔐 <b>Security</b>",
         f"├ Rug   <b>{rug_text}</b> {rug_badge}",
+        f"├ Top10 <b>{t.top10_pct:.1f}%</b> · Max <b>{t.largest_holder_pct:.1f}%</b>",
+        f"├ LP lock <b>{'n/a' if t.lp_locked_pct is None else f'{t.lp_locked_pct:.0f}%'}</b>",
+        f"├ Auth  mint {'ON' if t.mint_authority_active else 'off'} · freeze {'ON' if t.freeze_authority_active else 'off'}",
         f"├ Curve <b>{t.curve_pct:.0f}%</b>",
         f"├ State <b>{state_text}</b>",
         f"└ Src   {html.escape(t.source)}",
