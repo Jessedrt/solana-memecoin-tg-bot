@@ -17,6 +17,8 @@ class handler(BaseHTTPRequestHandler):
             "redis": serverless.has_redis(),
             "redis_backend": ("url" if serverless.STANDARD_REDIS_URL else ("rest" if serverless.REDIS_REST_URL else "none")),
             "qstash": bool(serverless.QSTASH_TOKEN),
+            "solana_tracker": bool(bot.SOLANA_TRACKER_API_KEY),
+            "deep_dd_required": bool(bot.REQUIRE_DEEP_DD),
             "scheduler": serverless.SCAN_CRON,
         }
         body = json.dumps(payload).encode("utf-8")
