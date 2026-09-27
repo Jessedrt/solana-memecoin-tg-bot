@@ -801,7 +801,7 @@ def format_alert(t: Token) -> str:
     rug_text = f"{rug}/100" if rug is not None else "n/a"
     rug_badge = (
         "🟢" if rug is not None and rug <= 20
-        else "🟡" if rug is not None and rug < 60
+        else "🟡" if rug is not None and rug <= 40
         else "🔴" if rug is not None
         else "⚪️"
     )
