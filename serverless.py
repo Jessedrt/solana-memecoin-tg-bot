@@ -415,7 +415,9 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     return stats
 
 
-def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
+def run_scan(*, require_durable_state: bool = True, respect_enabled: bool = False) -> dict[str, int]:
+    if respect_enabled and not scanner_enabled():
+        return {"seen": 0, "filtered": 0, "scored": 0, "alerted": 0, "skipped": 1, "disabled": 1}
     if not bot.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
     if require_durable_state and not has_redis():
@@ -493,10 +495,79 @@ def ensure_qstash_schedule() -> dict[str, Any]:
     )
     r.raise_for_status()
     data = r.json()
+    set_scanner_enabled(True)
     return {
         "configured": True,
         "schedule_id": data.get("scheduleId") or schedule_id,
         "cron": SCAN_CRON,
+        "destination": destination,
+    }
+
+
+def delete_qstash_schedule() -> dict[str, Any]:
+    """Delete Pulse's QStash schedule and mark automatic scanning OFF."""
+    if not QSTASH_TOKEN:
+        return {"disabled": False, "reason": "QSTASH_TOKEN missing"}
+
+    base = production_base_url()
+    destination = f"{base}/api/scan" if base else ""
+    configured_id = os.getenv("QSTASH_SCHEDULE_ID", "solana-memecoin-scanner").strip()
+    headers = {"Authorization": f"Bearer {QSTASH_TOKEN}"}
+
+    schedule_ids: list[str] = []
+    if configured_id:
+        schedule_ids.append(configured_id)
+
+    # Also discover matching schedules so stale/random IDs from older setup
+    # versions cannot keep scanning after /off.
+    try:
+        listing = requests.get(
+            f"{QSTASH_BASE_URL}/v2/schedules",
+            headers=headers,
+            timeout=15,
+        )
+        listing.raise_for_status()
+        rows = listing.json()
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                sid = str(row.get("scheduleId") or "")
+                dest = str(row.get("destination") or "")
+                if sid and (sid == configured_id or (destination and dest == destination)):
+                    schedule_ids.append(sid)
+    except Exception as exc:
+        bot.log.warning("QStash schedule listing failed during /off: %s", exc)
+
+    deleted: list[str] = []
+    failures: list[str] = []
+    for sid in dict.fromkeys(schedule_ids):
+        try:
+            r = requests.delete(
+                f"{QSTASH_BASE_URL}/v2/schedules/{quote(sid, safe='')}",
+                headers=headers,
+                timeout=15,
+            )
+            if r.status_code in (200, 202, 204, 404):
+                if r.status_code != 404:
+                    deleted.append(sid)
+            else:
+                failures.append(f"{sid}:{r.status_code}")
+        except Exception as exc:
+            failures.append(f"{sid}:{type(exc).__name__}")
+
+    if failures:
+        return {
+            "disabled": False,
+            "deleted": deleted,
+            "failures": failures,
+            "reason": "One or more QStash schedules could not be deleted",
+        }
+
+    set_scanner_enabled(False)
+    return {
+        "disabled": True,
+        "deleted": deleted,
         "destination": destination,
     }
 
