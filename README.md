@@ -79,3 +79,5 @@ Never commit bot tokens, Redis tokens, QStash tokens, wallet seed phrases or pri
 <!-- trigger-after-vercel-git-reconnect -->
 
 <!-- trigger-after-qstash-connect -->
+
+> Preview deployments that enforce Deep DD also require `SOLANA_TRACKER_API_KEY` in the Vercel Preview environment. Environment-variable changes apply to new deployments, so redeploy the preview after adding or changing the key.
