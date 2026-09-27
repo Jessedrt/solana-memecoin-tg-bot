@@ -299,6 +299,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             continue
         watch = bot.Token(
             mint=mint,
+            name=str(snap.get("name") or ""),
+            symbol=str(snap.get("symbol") or ""),
             source="dexscreener-watchlist",
             created_ms=int(snap.get("created_ms") or 0),
             usd_mcap=float(snap.get("usd_mcap") or 0),
@@ -391,6 +393,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             "sells_m5": int(token.sells_m5 or 0),
             "price_change_m5": float(token.price_change_m5 or 0),
             "created_ms": int(token.created_ms or 0),
+            "name": token.name,
+            "symbol": token.symbol,
             "source": token.source,
             "dex_id": token.dex_id,
             "volume_h1": float(token.volume_h1 or 0),
