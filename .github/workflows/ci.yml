@@ -65,5 +65,20 @@ jobs:
 
           # Structural gate must fail closed when the full report is absent.
           assert not bot.structural_safety_ok(t)
+
+          # Regression: a PumpSwap token is a DEX pool, not a live Pump curve.
+          migrated = bot.Token(
+              mint="111111111111111111111111111111pump",
+              name="Migrated",
+              symbol="MIG",
+              source="gecko-new",
+              dex_id="pumpswap",
+              liquidity_usd=28000,
+              price_usd=0.00001,
+              usd_mcap=18000,
+          )
+          assert bot.is_pump_token(migrated)
+          assert not bot.is_live_pump_curve(migrated)
+          assert bot.has_exit_capacity(migrated)
           print(rendered)
           PY
