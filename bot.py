@@ -834,75 +834,87 @@ def format_alert(t: Token) -> str:
     pump = f"https://pump.fun/coin/{t.mint}"
     primary_url = t.pair_url or (pump if pump_like else dex)
     venue = html.escape(t.dex_id or ("Pump" if pump_like else t.source))
-    state_text = (
-        ("Migrated" if t.complete else "Bonding")
-        if pump_like else "DEX pool"
-    )
+    state_text = ("Migrated" if t.complete else "Bonding") if pump_like else "DEX pool"
     gmgn = f"https://gmgn.ai/sol/token/{t.mint}"
     birdeye = f"https://birdeye.so/token/{t.mint}?chain=solana"
     solscan = f"https://solscan.io/token/{t.mint}"
 
-    lore = ""
+    lines: list[str] = [
+        f"🔥 <b>{name} (\${symbol})</b>",
+        f'└ <a href="{primary_url}">{venue}</a> │ ⏱ {age} │ Score <b>{t.score}/100</b>',
+        "",
+        "📊 <b>Stats</b>",
+        f"├ USD   <b>{price_text}</b> ({t.price_change_h1:+.0f}% 1H)",
+        f"├ MC    <b>{fmt_usd(t.usd_mcap)}</b>",
+        f"├ Vol   <b>{fmt_usd(t.volume_h1)}</b>",
+        f"├ LP    <b>{fmt_usd(t.liquidity_usd)}</b>",
+        f"├ 1H    <b>{t.price_change_h1:+.0f}%</b>  B {t.buys_h1} │ S {t.sells_h1}",
+        f"└ B/S   <b>{ratio:.1f}x</b>" if ratio else "└ B/S   n/a",
+        "",
+        "🔗 <b>Socials</b>",
+        f"├ {social_text}",
+    ]
+
     if t.description:
         safe = html.escape(t.description.replace("\n", " ").strip())
-        lore = f"\n├ Lore  <i>{safe[:180]}</i>"
+        lines.append(f"└ Lore  <i>{safe[:180]}</i>")
 
-    buy_links = (
+    lines.extend([
+        "",
+        "🔐 <b>Security</b>",
+        f"├ Rug   <b>{rug_text}</b> {rug_badge}",
+        f"├ Curve <b>{t.curve_pct:.0f}%</b>",
+        f"├ State <b>{state_text}</b>",
+        f"└ Src   {html.escape(t.source)}",
+        "",
+    ])
+
+    if t.early_score >= PRE_PUMP_MIN_SCORE:
+        early = html.escape(", ".join(t.early_reasons[:6]) or "early acceleration")
+        lines.extend([
+            f"🚨 <b>Early Pump</b>  <b>{t.early_score}/100</b>",
+            f"└ {early}",
+            "",
+        ])
+
+    lines.append("💧 <b>Exit check</b>")
+    exits = exit_estimates(t)
+    for idx, (size, proceeds, impact) in enumerate(exits):
+        branch = "└" if idx == len(exits) - 1 else "├"
+        lines.append(
+            f"{branch} \${size//1000}K → <b>\${proceeds:,.0f}</b> · impact {impact:.0f}%"
+        )
+    if pump_like and not t.complete:
+        lines.append(f"└ Curve real SOL <b>{t.real_sol:.2f}</b>")
+
+    lines.extend([
+        "",
+        "🧠 <b>Why alerted</b>",
+        f"└ {reasons}",
+        "",
+        "📋 <b>CA</b>",
+        f"<code>{html.escape(t.mint)}</code>",
+        "",
+    ])
+
+    research = []
+    if pump_like:
+        research.append(f'<a href="{pump}">PF</a>')
+    research.extend([
+        f'<a href="{dex}">DS</a>',
+        f'<a href="{gmgn}">GMGN</a>',
+        f'<a href="{birdeye}">BE</a>',
+        f'<a href="{solscan}">SOL</a>',
+    ])
+    lines.append(" · ".join(research))
+    lines.append(
+        "Buy: "
         f'<a href="https://t.me/GMGN_sol_bot?start=i_xGrok_{t.mint}">GMGN</a> · '
         f'<a href="https://t.me/BloomSolana_bot?start=ca_{t.mint}">Bloom</a> · '
         f'<a href="https://t.me/bonkbot_bot?start=ref_ca_{t.mint}">BonkBot</a>'
     )
 
-    return (
-        f"🔥 <b>{name} (\${symbol})</b>\n"
-        f'└ <a href="{primary_url}">{venue}</a> │ ⏱ {age} │ Score <b>{t.score}/100</b>\n\n'
-
-        f"📊 <b>Stats</b>\n"
-        f"├ USD   <b>{price_text}</b> ({t.price_change_h1:+.0f}% 1H)\n"
-        f"├ MC    <b>{fmt_usd(t.usd_mcap)}</b>\n"
-        f"├ Vol   <b>{fmt_usd(t.volume_h1)}</b>\n"
-        f"├ LP    <b>{fmt_usd(t.liquidity_usd)}</b>\n"
-        f"├ 1H    <b>{t.price_change_h1:+.0f}%</b>  B {t.buys_h1} │ S {t.sells_h1}\n"
-        + (f"└ B/S   <b>{ratio:.1f}x</b>\n\n" if ratio else "└ B/S   n/a\n\n")
-
-        + f"🔗 <b>Socials</b>\n"
-        f"├ {social_text}"
-        f"{lore}\n\n"
-
-        f"🔐 <b>Security</b>\n"
-        f"├ Rug   <b>{rug_text}</b> {rug_badge}\n"
-        f"├ Curve <b>{t.curve_pct:.0f}%</b>\n"
-        f"├ State <b>{state_text}</b>\n"
-        f"└ Src   {html.escape(t.source)}\n\n"
-
-        + (
-            f"🚨 <b>Early Pump</b>  <b>{t.early_score}/100</b>\n"
-            f"└ {html.escape(', '.join(t.early_reasons[:6]))}\n\n"
-            if t.early_score >= PRE_PUMP_MIN_SCORE else ""
-        )
-        + "💧 <b>Exit check</b>\n"
-        + "".join(
-            f"{'├' if size != 100000 else '└'} ${size//1000}K → <b>${proceeds:,.0f}</b> · impact {impact:.0f}%\n"
-            for size, proceeds, impact in exit_estimates(t)
-        )
-        + (
-            f"└ Curve real SOL <b>{t.real_sol:.2f}</b>\n\n"
-            if pump_like and not t.complete
-            else "\n"
-        )
-        + f"🧠 <b>Why alerted</b>\n"
-        f"└ {reasons}\n\n"
-
-        f"📋 <b>CA</b>\n"
-        f"<code>{html.escape(t.mint)}</code>\n\n"
-
-        (f'<a href="{pump}">PF</a> · ' if pump_like else "")
-        + f'<a href="{dex}">DS</a> · '
-        f'<a href="{gmgn}">GMGN</a> · '
-        f'<a href="{birdeye}">BE</a> · '
-        f'<a href="{solscan}">SOL</a>\n'
-        f"Buy: {buy_links}"
-    )
+    return "\n".join(lines)
 
 HELP = (
     "Solana memecoin scanner is running.\n\n"
