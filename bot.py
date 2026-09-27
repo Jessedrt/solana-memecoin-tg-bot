@@ -328,6 +328,187 @@ def has_exit_capacity(token: Token) -> bool:
     return proceeds >= 800.0
 
 
+def tracker_get(path: str, params: dict[str, Any] | None = None) -> Any:
+    if not SOLANA_TRACKER_API_KEY:
+        raise RuntimeError("SOLANA_TRACKER_API_KEY is missing")
+    r = requests.get(
+        f"{SOLANA_TRACKER_API}{path}",
+        params=params or {},
+        headers={"x-api-key": SOLANA_TRACKER_API_KEY, "Accept": "application/json", "User-Agent": UA},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
+    """Dev history, bundles, insiders and top-holder cost basis."""
+    if not SOLANA_TRACKER_API_KEY:
+        return {"checked": False, "reason": "SOLANA_TRACKER_API_KEY missing"}
+    try:
+        info = tracker_get(f"/tokens/{token.mint}")
+        pools = info.get("pools") or [] if isinstance(info, dict) else []
+        risk = info.get("risk") or {} if isinstance(info, dict) else {}
+
+        deployer = ""
+        for pool in pools if isinstance(pools, list) else []:
+            if not isinstance(pool, dict):
+                continue
+            deployer = str(pool.get("deployer") or "")
+            if not deployer:
+                creation = pool.get("creation") or {}
+                if isinstance(creation, dict):
+                    deployer = str(creation.get("creator") or "")
+            if deployer:
+                break
+
+        bundlers = tracker_get(f"/tokens/{token.mint}/bundlers")
+        bundler_pct = float(bundlers.get("percentage") or 0) if isinstance(bundlers, dict) else 0.0
+
+        insider_pct = 0.0
+        sniper_pct = 0.0
+        if isinstance(risk, dict):
+            insiders = risk.get("insiders") or {}
+            snipers = risk.get("snipers") or {}
+            if isinstance(insiders, dict):
+                insider_pct = float(insiders.get("totalPercentage") or insiders.get("percentage") or 0)
+            if isinstance(snipers, dict):
+                sniper_pct = float(snipers.get("totalPercentage") or snipers.get("percentage") or 0)
+
+        holders = tracker_get(f"/tokens/{token.mint}/holders", {"enrich": "all"})
+        accounts = holders.get("accounts") if isinstance(holders, dict) else []
+        accounts = accounts if isinstance(accounts, list) else []
+
+        implied_supply = token.usd_mcap / token.price_usd if token.usd_mcap > 0 and token.price_usd > 0 else 0.0
+        entry_mcaps: list[float] = []
+        cheap_count = 0
+        cheap_pct = 0.0
+        investors = 0
+
+        for row in accounts:
+            if not isinstance(row, dict):
+                continue
+            identity = row.get("identity") or {}
+            identity_text = " ".join(
+                [str(identity.get("type") or "")] +
+                [str(x) for x in (identity.get("tags") or [])]
+            ).lower() if isinstance(identity, dict) else ""
+            if "pool" in identity_text or "exchange" in identity_text:
+                continue
+            pnl = row.get("pnl") or {}
+            tp = pnl.get("token") if isinstance(pnl, dict) else {}
+            tp = tp if isinstance(tp, dict) else {}
+            avg_cost = float(tp.get("avgCost") or 0)
+            if avg_cost <= 0 or implied_supply <= 0:
+                continue
+            investors += 1
+            entry_mc = avg_cost * implied_supply
+            entry_mcaps.append(entry_mc)
+            sells = int(tp.get("sells") or 0)
+            total_sold = float(tp.get("totalSold") or 0)
+            pct = float(row.get("percentage") or 0)
+            if entry_mc < CHEAP_ENTRY_MCAP_USD and sells == 0 and total_sold <= 0:
+                cheap_count += 1
+                cheap_pct += pct
+            if investors >= 10:
+                break
+
+        entry_min = min(entry_mcaps) if entry_mcaps else 0.0
+        entry_max = max(entry_mcaps) if entry_mcaps else 0.0
+        entry_in_range = bool(entry_min and entry_max and entry_min <= token.usd_mcap <= entry_max)
+
+        dev_count = dev_24h = dev_live = dev_dead = 0
+        if deployer:
+            dev = tracker_get(f"/deployer/{deployer}", {"format": "full", "limit": 50})
+            rows = dev.get("tokens") if isinstance(dev, dict) else []
+            rows = rows if isinstance(rows, list) else []
+            prior = [x for x in rows if isinstance(x, dict) and str(x.get("mint") or "") != token.mint]
+            dev_count = len(prior)
+            cutoff = time.time() * 1000 - 86400000
+            for item in prior:
+                created = float(item.get("createdAt") or 0)
+                if created and created < 10000000000:
+                    created *= 1000
+                if created >= cutoff:
+                    dev_24h += 1
+                mc = float(item.get("marketCapUsd") or 0)
+                liq = float(item.get("liquidityUsd") or 0)
+                if mc >= 20000 and liq >= 5000:
+                    dev_live += 1
+                if mc < 5000 or liq < 1000:
+                    dev_dead += 1
+
+        reasons: list[str] = []
+        if bundler_pct > MAX_BUNDLER_PCT:
+            reasons.append(f"bundlers {bundler_pct:.1f}%")
+        if cheap_count > MAX_CHEAP_UNSOLD_TOP10_COUNT or cheap_pct > MAX_CHEAP_UNSOLD_TOP10_PCT:
+            reasons.append(f"cheap unsold top holders: {cheap_count} / {cheap_pct:.1f}%")
+        if entry_mcaps and not entry_in_range:
+            reasons.append(f"entry outside top-holder range {fmt_usd(entry_min)}-{fmt_usd(entry_max)}")
+        if dev_24h >= SERIAL_DEV_LAUNCHES_24H:
+            reasons.append(f"serial dev {dev_24h} launches/24h")
+        if dev_count >= 3 and dev_dead / max(dev_count, 1) >= 0.70:
+            reasons.append(f"poor dev history {dev_dead}/{dev_count} dead")
+
+        return {
+            "checked": bool(deployer and investors >= 3),
+            "deployer_wallet": deployer,
+            "dev_launch_count": dev_count,
+            "dev_launches_24h": dev_24h,
+            "dev_survivor_count": dev_live,
+            "dev_dead_count": dev_dead,
+            "bundler_pct": bundler_pct,
+            "tracker_insider_pct": insider_pct,
+            "tracker_sniper_pct": sniper_pct,
+            "cheap_unsold_top10_count": cheap_count,
+            "cheap_unsold_top10_pct": cheap_pct,
+            "top10_entry_mcap_min": entry_min,
+            "top10_entry_mcap_max": entry_max,
+            "entry_within_top10_range": entry_in_range,
+            "holder_entry_count": investors,
+            "reasons": reasons,
+        }
+    except Exception as exc:
+        log.warning("Solana Tracker DD failed for %s: %s", token.mint, exc)
+        return {"checked": False, "reason": str(exc)[:160]}
+
+
+def apply_deep_dd(token: Token, data: dict[str, Any]) -> None:
+    token.deep_dd_checked = bool(data.get("checked"))
+    token.deployer_wallet = str(data.get("deployer_wallet") or "")
+    token.dev_launch_count = int(data.get("dev_launch_count") or 0)
+    token.dev_launches_24h = int(data.get("dev_launches_24h") or 0)
+    token.dev_survivor_count = int(data.get("dev_survivor_count") or 0)
+    token.dev_dead_count = int(data.get("dev_dead_count") or 0)
+    token.bundler_pct = float(data.get("bundler_pct") or 0)
+    token.tracker_insider_pct = float(data.get("tracker_insider_pct") or 0)
+    token.tracker_sniper_pct = float(data.get("tracker_sniper_pct") or 0)
+    token.cheap_unsold_top10_count = int(data.get("cheap_unsold_top10_count") or 0)
+    token.cheap_unsold_top10_pct = float(data.get("cheap_unsold_top10_pct") or 0)
+    token.top10_entry_mcap_min = float(data.get("top10_entry_mcap_min") or 0)
+    token.top10_entry_mcap_max = float(data.get("top10_entry_mcap_max") or 0)
+    token.entry_within_top10_range = bool(data.get("entry_within_top10_range"))
+    token.deep_dd_reasons = [str(x) for x in (data.get("reasons") or [])]
+
+
+def deep_due_diligence_ok(token: Token) -> bool:
+    if not token.deep_dd_checked:
+        return not REQUIRE_DEEP_DD
+    if token.bundler_pct > MAX_BUNDLER_PCT:
+        return False
+    if token.cheap_unsold_top10_count > MAX_CHEAP_UNSOLD_TOP10_COUNT:
+        return False
+    if token.cheap_unsold_top10_pct > MAX_CHEAP_UNSOLD_TOP10_PCT:
+        return False
+    if token.top10_entry_mcap_min > 0 and not token.entry_within_top10_range:
+        return False
+    if token.dev_launches_24h >= SERIAL_DEV_LAUNCHES_24H:
+        return False
+    if token.dev_launch_count >= 3 and token.dev_dead_count / max(token.dev_launch_count, 1) >= 0.70:
+        return False
+    return True
+
+
 def rugcheck_new() -> list[dict[str, Any]]:
     try:
         data = http_get(RUGCHECK_NEW)
