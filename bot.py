@@ -1322,7 +1322,7 @@ def format_alert(t: Token) -> str:
     if t.early_score >= PRE_PUMP_MIN_SCORE:
         early = html.escape(", ".join(t.early_reasons[:6]) or "early acceleration")
         lines.extend([
-            f"🚨 <b>Early Pump</b>  <b>{t.early_score}/100</b>",
+            f"🚨 <b>Pre-Move Alert</b>  <b>{t.early_score}/100</b>",
             f"└ {early}",
             "",
         ])
@@ -1470,42 +1470,18 @@ def scan_once(tg: Telegram, state: dict[str, float]) -> dict[str, int]:
 
 
 def handle_command(tg: Telegram, chat_id: str, text: str, state: dict[str, float], last_stats: dict[str, int]) -> None:
+    """Coin-alert-only command handling; commands never send acknowledgements."""
     cmd = text.split()[0].split("@")[0].lower()
-    if cmd in ("/start", "/help"):
+    if cmd == "/start":
         if not TELEGRAM_CHAT_ID:
             tg.chat_id = chat_id
-        tg.send(HELP, chat_id=chat_id)
-        tg.send(
-            f"This chat id is <code>{chat_id}</code>\n"
-            f"Put it in TELEGRAM_CHAT_ID if you want alerts locked to you only.",
-            chat_id=chat_id,
-        )
-    elif cmd == "/status":
-        tg.send(
-            "Filters\n"
-            f"• age ≤ {MAX_AGE_MINUTES}m\n"
-            f"• mcap {fmt_usd(MIN_MCAP_USD)}–{fmt_usd(MAX_MCAP_USD)}\n"
-            f"• min replies {MIN_REPLIES}\n"
-            f"• min score {MIN_SCORE}\n"
-            f"• still on curve: {REQUIRE_STILL_ON_CURVE}\n"
-            f"• scan every {SCAN_INTERVAL}s\n"
-            f"Last scan: seen {last_stats.get('seen', 0)}, "
-            f"passed {last_stats.get('filtered', 0)}, "
-            f"alerted {last_stats.get('alerted', 0)}\n"
-            f"Known alerts stored: {len(state)}",
-            chat_id=chat_id,
-        )
-    elif cmd == "/scan":
-        tg.send("Scanning now…", chat_id=chat_id)
+        return
+    if cmd == "/scan":
         stats = scan_once(tg, state)
         last_stats.update(stats)
-        if stats["alerted"] == 0:
-            tg.send(
-                f"No high-potential hits this pass.\n"
-                f"Seen {stats['seen']} · passed filters {stats['filtered']} · scored {stats['scored']}",
-                chat_id=chat_id,
-            )
-
+        return
+    # All other commands are intentionally silent in coin-alert-only mode.
+    log.info("Ignored command in coin-alert-only mode: %s", cmd)
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
@@ -1518,12 +1494,6 @@ def main() -> None:
     state = load_state()
     last_stats: dict[str, int] = {}
     log.info("scanner started interval=%ss min_score=%s", SCAN_INTERVAL, MIN_SCORE)
-    if TELEGRAM_CHAT_ID:
-        tg.send(
-            f"Scanner online at {datetime.now(timezone.utc).strftime('%H:%M UTC')}.\n"
-            f"Watching Pump.fun / RugCheck / DexScreener.\n"
-            f"Send /status or /scan."
-        )
     last_scan = 0.0
     while True:
         try:
