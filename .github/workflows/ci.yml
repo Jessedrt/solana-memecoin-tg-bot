@@ -47,5 +47,23 @@ jobs:
           assert "Exit check" in rendered
           assert "Why alerted" in rendered
           assert "SMOKE" in rendered
+
+          # Regression: a late +1314% move with more sells than buys must
+          # never pass the anti-chase momentum gate, regardless of RugCheck.
+          late = bot.Token(
+              mint="11111111111111111111111111111111",
+              name="Late Pump",
+              symbol="LATE",
+              source="gecko-new",
+              price_change_h1=1314,
+              price_change_m5=34,
+              buys_h1=472,
+              sells_h1=543,
+              rug_score=1,
+          )
+          assert not bot.momentum_not_extended(late)
+
+          # Structural gate must fail closed when the full report is absent.
+          assert not bot.structural_safety_ok(t)
           print(rendered)
           PY
