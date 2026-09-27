@@ -122,6 +122,8 @@ class Token:
     tracker_dev_pct: float = 0.0
     tracker_rugged: bool = False
     tracker_risk_score: float = 0.0
+    tracker_mint_authority_active: bool = False
+    tracker_freeze_authority_active: bool = False
     tracker_danger_risks: list[str] = field(default_factory=list)
     cheap_unsold_top10_count: int = 0
     cheap_unsold_top10_pct: float = 0.0
@@ -373,16 +375,21 @@ def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
         risk = info.get("risk") or {} if isinstance(info, dict) else {}
 
         deployer = ""
+        tracker_mint_authority_active = False
+        tracker_freeze_authority_active = False
         for pool in pools if isinstance(pools, list) else []:
             if not isinstance(pool, dict):
                 continue
-            deployer = str(pool.get("deployer") or "")
+            security = pool.get("security") or {}
+            if isinstance(security, dict):
+                tracker_mint_authority_active = tracker_mint_authority_active or bool(security.get("mintAuthority"))
+                tracker_freeze_authority_active = tracker_freeze_authority_active or bool(security.get("freezeAuthority"))
             if not deployer:
-                creation = pool.get("creation") or {}
-                if isinstance(creation, dict):
-                    deployer = str(creation.get("creator") or "")
-            if deployer:
-                break
+                deployer = str(pool.get("deployer") or "")
+                if not deployer:
+                    creation = pool.get("creation") or {}
+                    if isinstance(creation, dict):
+                        deployer = str(creation.get("creator") or "")
 
         bundlers = tracker_get(f"/tokens/{token.mint}/bundlers")
         bundler_pct = float(bundlers.get("percentage") or 0) if isinstance(bundlers, dict) else 0.0
@@ -504,6 +511,8 @@ def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
             "tracker_dev_pct": tracker_dev,
             "tracker_rugged": tracker_rugged,
             "tracker_risk_score": tracker_risk_score,
+            "tracker_mint_authority_active": tracker_mint_authority_active,
+            "tracker_freeze_authority_active": tracker_freeze_authority_active,
             "tracker_danger_risks": tracker_danger_risks,
             "cheap_unsold_top10_count": cheap_count,
             "cheap_unsold_top10_pct": cheap_pct,
@@ -532,6 +541,8 @@ def apply_deep_dd(token: Token, data: dict[str, Any]) -> None:
     token.tracker_dev_pct = float(data.get("tracker_dev_pct") or 0)
     token.tracker_rugged = bool(data.get("tracker_rugged"))
     token.tracker_risk_score = float(data.get("tracker_risk_score") or 0)
+    token.tracker_mint_authority_active = bool(data.get("tracker_mint_authority_active"))
+    token.tracker_freeze_authority_active = bool(data.get("tracker_freeze_authority_active"))
     token.tracker_danger_risks = [str(x) for x in (data.get("tracker_danger_risks") or [])]
     token.cheap_unsold_top10_count = int(data.get("cheap_unsold_top10_count") or 0)
     token.cheap_unsold_top10_pct = float(data.get("cheap_unsold_top10_pct") or 0)
@@ -559,8 +570,10 @@ def deep_due_diligence_failures(token: Token) -> list[str]:
         failures.append(f"snipers {token.tracker_sniper_pct:.1f}% > 15%")
     if token.bundler_pct > MAX_BUNDLER_PCT:
         failures.append(f"bundlers {token.bundler_pct:.1f}% > {MAX_BUNDLER_PCT:.0f}%")
-    if token.tracker_danger_risks:
-        failures.append("danger: " + ", ".join(token.tracker_danger_risks[:3]))
+    if token.tracker_mint_authority_active:
+        failures.append("mint authority active")
+    if token.tracker_freeze_authority_active:
+        failures.append("freeze authority active")
     if token.cheap_unsold_top10_count > MAX_CHEAP_UNSOLD_TOP10_COUNT:
         failures.append(
             f"cheap unsold holders {token.cheap_unsold_top10_count} > {MAX_CHEAP_UNSOLD_TOP10_COUNT}"
