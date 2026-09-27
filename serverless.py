@@ -288,12 +288,17 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
 
         # Risk-first rule: unknown core data is unsafe, and a signal that cannot
         # support a reasonable $1K exit is not sent as an actionable alert.
-        regular_alert = token.score >= bot.MIN_SCORE and core_checked and exit_ok
+        regular_alert = (
+            token.score >= bot.MIN_SCORE
+            and core_checked
+            and exit_ok
+            and token.rug_score <= 40
+        )
         early_alert = (
             token.early_score >= bot.PRE_PUMP_MIN_SCORE
             and core_checked
             and exit_ok
-            and token.rug_score < 60
+            and token.rug_score <= 30
             and token.price_change_m5 < 80
         )
         if not (regular_alert or early_alert):
