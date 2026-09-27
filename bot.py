@@ -1227,6 +1227,20 @@ def format_alert(t: Token) -> str:
             "",
         ])
 
+    lines.extend([
+        "🧬 <b>Deep DD</b>",
+        f"├ Bundlers <b>{t.bundler_pct:.1f}%</b> · Insiders <b>{t.tracker_insider_pct:.1f}%</b>",
+        f"├ Dev <b>{t.dev_launch_count}</b> prior · <b>{t.dev_launches_24h}</b>/24h · survivors <b>{t.dev_survivor_count}</b>",
+        f"├ Cheap unsold top10 <b>{t.cheap_unsold_top10_count}</b> · {t.cheap_unsold_top10_pct:.1f}%",
+        (
+            f"└ Top10 entry MC <b>{fmt_usd(t.top10_entry_mcap_min)}–{fmt_usd(t.top10_entry_mcap_max)}</b> "
+            f"{'✅' if t.entry_within_top10_range else '❌'}"
+            if t.top10_entry_mcap_min > 0
+            else "└ Top10 entry MC <b>unavailable</b>"
+        ),
+        "",
+    ])
+
     lines.append("💧 <b>Exit check</b>")
     exits = exit_estimates(t)
     for idx, (size, proceeds, impact) in enumerate(exits):
@@ -1250,8 +1264,10 @@ def format_alert(t: Token) -> str:
     research = []
     if pump_like:
         research.append(f'<a href="{pump}">PF</a>')
+    bubbles = f"https://v2.bubblemaps.io/map?address={t.mint}&chain=solana&partnerId=regular"
     research.extend([
         f'<a href="{dex}">DS</a>',
+        f'<a href="{bubbles}">Bubbles</a>',
         f'<a href="{gmgn}">GMGN</a>',
         f'<a href="{birdeye}">BE</a>',
         f'<a href="{solscan}">SOL</a>',
