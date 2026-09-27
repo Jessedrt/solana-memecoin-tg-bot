@@ -200,7 +200,12 @@ def scanner_enabled() -> bool:
     if not has_redis():
         return False
     try:
-        return str(redis_command("GET", SCANNER_ENABLED_KEY) or "0") == "1"
+        raw = redis_command("GET", SCANNER_ENABLED_KEY)
+        # Backward compatibility: Pulse had an active schedule before this key
+        # existed, so absence means ON until /off explicitly stores "0".
+        if raw in (None, ""):
+            return True
+        return str(raw) == "1"
     except Exception:
         return False
 
