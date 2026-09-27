@@ -318,7 +318,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     for token in enrich_batch:
         bot.dexscreener_enrich(token)
         stats["enriched"] += 1
-        if bot.is_pump_token(token):
+        if bot.is_live_pump_curve(token):
             bot.pump_enrich(token)
 
         # DexScreener discovery rows do not include pair age/MCAP up front.
@@ -353,8 +353,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             or token.pump_checked
         )
         market_liquidity_checked = (
-            (bot.is_pump_token(token) and not token.complete and token.pump_checked and token.real_sol > 0)
-            or token.liquidity_usd > 0
+            (bot.is_live_pump_curve(token) and token.pump_checked and token.real_sol > 0)
+            or (not bot.is_live_pump_curve(token) and token.liquidity_usd > 0)
         )
         core_checked = (
             token.price_usd > 0
