@@ -36,6 +36,7 @@ UA = (
 PUMP_API = "https://frontend-api-v3.pump.fun"
 DS_API = "https://api.dexscreener.com"
 GECKO_API = "https://api.geckoterminal.com/api/v2"
+SOLANA_TRACKER_API = "https://data.solanatracker.io"
 RUGCHECK_NEW = "https://api.rugcheck.xyz/v1/stats/new_tokens"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 RUGCHECK_FULL_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
@@ -50,6 +51,13 @@ MAX_MCAP_USD = float(os.getenv("MAX_MCAP_USD", "350000"))
 MIN_REPLIES = int(os.getenv("MIN_REPLIES", "2"))
 MIN_SCORE = int(os.getenv("MIN_SCORE", "55"))
 PRE_PUMP_MIN_SCORE = int(os.getenv("PRE_PUMP_MIN_SCORE", "68"))
+SOLANA_TRACKER_API_KEY = os.getenv("SOLANA_TRACKER_API_KEY", "").strip()
+REQUIRE_DEEP_DD = os.getenv("REQUIRE_DEEP_DD", "true").lower() == "true"
+MAX_BUNDLER_PCT = float(os.getenv("MAX_BUNDLER_PCT", "15"))
+MAX_CHEAP_UNSOLD_TOP10_COUNT = int(os.getenv("MAX_CHEAP_UNSOLD_TOP10_COUNT", "3"))
+MAX_CHEAP_UNSOLD_TOP10_PCT = float(os.getenv("MAX_CHEAP_UNSOLD_TOP10_PCT", "10"))
+CHEAP_ENTRY_MCAP_USD = float(os.getenv("CHEAP_ENTRY_MCAP_USD", "10000"))
+SERIAL_DEV_LAUNCHES_24H = int(os.getenv("SERIAL_DEV_LAUNCHES_24H", "4"))
 REQUIRE_STILL_ON_CURVE = os.getenv("REQUIRE_STILL_ON_CURVE", "true").lower() == "true"
 REQUIRE_SOCIALS = os.getenv("REQUIRE_SOCIALS", "false").lower() == "true"
 ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "180"))
@@ -101,6 +109,21 @@ class Token:
     insider_pct: float = 0.0
     lp_locked_pct: float | None = None
     structural_risks: list[str] = field(default_factory=list)
+    deep_dd_checked: bool = False
+    deployer_wallet: str = ""
+    dev_launch_count: int = 0
+    dev_launches_24h: int = 0
+    dev_survivor_count: int = 0
+    dev_dead_count: int = 0
+    bundler_pct: float = 0.0
+    tracker_insider_pct: float = 0.0
+    tracker_sniper_pct: float = 0.0
+    cheap_unsold_top10_count: int = 0
+    cheap_unsold_top10_pct: float = 0.0
+    top10_entry_mcap_min: float = 0.0
+    top10_entry_mcap_max: float = 0.0
+    entry_within_top10_range: bool = False
+    deep_dd_reasons: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     score: int = 0
     early_score: int = 0
