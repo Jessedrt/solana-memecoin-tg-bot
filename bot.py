@@ -541,34 +541,51 @@ def apply_deep_dd(token: Token, data: dict[str, Any]) -> None:
     token.deep_dd_reasons = [str(x) for x in (data.get("reasons") or [])]
 
 
-def deep_due_diligence_ok(token: Token) -> bool:
+def deep_due_diligence_failures(token: Token) -> list[str]:
+    failures: list[str] = []
     if not token.deep_dd_checked:
-        return not REQUIRE_DEEP_DD
+        if REQUIRE_DEEP_DD:
+            failures.append("Deep DD unavailable")
+        return failures
     if token.tracker_rugged:
-        return False
+        failures.append("Tracker marks token rugged")
     if token.tracker_top10_pct > 45:
-        return False
+        failures.append(f"top10 {token.tracker_top10_pct:.1f}% > 45%")
     if token.tracker_dev_pct > 5:
-        return False
+        failures.append(f"dev holds {token.tracker_dev_pct:.1f}% > 5%")
     if token.tracker_insider_pct > 10:
-        return False
+        failures.append(f"insiders {token.tracker_insider_pct:.1f}% > 10%")
     if token.tracker_sniper_pct > 15:
-        return False
+        failures.append(f"snipers {token.tracker_sniper_pct:.1f}% > 15%")
     if token.bundler_pct > MAX_BUNDLER_PCT:
-        return False
+        failures.append(f"bundlers {token.bundler_pct:.1f}% > {MAX_BUNDLER_PCT:.0f}%")
     if token.tracker_danger_risks:
-        return False
+        failures.append("danger: " + ", ".join(token.tracker_danger_risks[:3]))
     if token.cheap_unsold_top10_count > MAX_CHEAP_UNSOLD_TOP10_COUNT:
-        return False
+        failures.append(
+            f"cheap unsold holders {token.cheap_unsold_top10_count} > {MAX_CHEAP_UNSOLD_TOP10_COUNT}"
+        )
     if token.cheap_unsold_top10_pct > MAX_CHEAP_UNSOLD_TOP10_PCT:
-        return False
+        failures.append(
+            f"cheap unsold supply {token.cheap_unsold_top10_pct:.1f}% > {MAX_CHEAP_UNSOLD_TOP10_PCT:.0f}%"
+        )
     if token.top10_entry_mcap_min > 0 and not token.entry_within_top10_range:
-        return False
+        failures.append(
+            f"MC outside holder entry range {fmt_usd(token.top10_entry_mcap_min)}-"
+            f"{fmt_usd(token.top10_entry_mcap_max)}"
+        )
     if token.dev_launches_24h >= SERIAL_DEV_LAUNCHES_24H:
-        return False
+        failures.append(f"serial dev {token.dev_launches_24h} launches/24h")
     if token.dev_launch_count >= 3 and token.dev_dead_count / max(token.dev_launch_count, 1) >= 0.70:
-        return False
-    return True
+        failures.append(f"poor dev history {token.dev_dead_count}/{token.dev_launch_count} dead")
+    return failures
+
+
+def deep_due_diligence_ok(token: Token) -> bool:
+    failures = deep_due_diligence_failures(token)
+    # Keep API-derived notes and computed hard-fail reasons visible in logs/alerts.
+    token.deep_dd_reasons = list(dict.fromkeys(token.deep_dd_reasons + failures))
+    return not failures
 
 
 def tracker_structural_fallback_ok(token: Token) -> bool:
