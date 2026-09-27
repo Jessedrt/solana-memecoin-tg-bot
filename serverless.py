@@ -269,6 +269,11 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         "candidates": 0,
         "structural_pass": 0,
         "deep_dd_pass": 0,
+        "fail_core": 0,
+        "fail_exit": 0,
+        "fail_score": 0,
+        "fail_rug": 0,
+        "fail_early": 0,
         "alerted": 0,
     }
     tokens = bot.collect_candidates()
@@ -372,7 +377,33 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             and token.rug_score <= 30
             and token.price_change_m5 < 80
         )
+        if not core_checked:
+            stats["fail_core"] += 1
+        if not exit_ok:
+            stats["fail_exit"] += 1
+        if token.score < bot.MIN_SCORE:
+            stats["fail_score"] += 1
+        if token.rug_score is None or token.rug_score > 40:
+            stats["fail_rug"] += 1
+        if token.early_score < bot.PRE_PUMP_MIN_SCORE:
+            stats["fail_early"] += 1
+
         if not (regular_candidate or early_candidate):
+            bot.log.info(
+                "near-miss %s score=%s early=%s rug=%s exit=%s core=%s "
+                "mcap=%.0f liq=%.0f h1=%.1f m5=%.1f b/s=%.2f",
+                token.mint,
+                token.score,
+                token.early_score,
+                token.rug_score,
+                exit_ok,
+                core_checked,
+                token.usd_mcap,
+                token.liquidity_usd,
+                token.price_change_h1,
+                token.price_change_m5,
+                (token.buys_h1 / max(token.sells_h1, 1)) if token.buys_h1 else 0,
+            )
             continue
         stats["candidates"] += 1
 
