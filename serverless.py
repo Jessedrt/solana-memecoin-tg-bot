@@ -348,8 +348,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         }
 
         pump_curve_ok = (
-            not bot.is_pump_token(token)
-            or token.complete
+            not bot.is_live_pump_curve(token)
             or token.pump_checked
         )
         market_liquidity_checked = (
@@ -398,7 +397,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             bot.log.info(
                 "near-miss %s score=%s early=%s rug=%s exit=%s core=%s "
                 "mcap=%.0f liq=%.0f h1=%.1f m5=%.1f b/s=%.2f "
-                "src=%s dex=%s age_ms=%s complete=%s pump=%s pump_checked=%s real_sol=%.2f",
+                "src=%s dex=%s age_ms=%s complete=%s pump=%s curve_live=%s pump_checked=%s real_sol=%.2f",
                 token.mint,
                 token.score,
                 token.early_score,
@@ -415,6 +414,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
                 token.created_ms,
                 token.complete,
                 bot.is_pump_token(token),
+                bot.is_live_pump_curve(token),
                 token.pump_checked,
                 token.real_sol,
             )
