@@ -232,9 +232,26 @@ def is_pump_token(token: Token) -> bool:
     )
 
 
+def is_live_pump_curve(token: Token) -> bool:
+    """True only while the token is actually on Pump.fun's bonding curve.
+
+    PumpSwap and other post-migration pools may still have a mint ending in
+    'pump', but their executable liquidity is the DEX pool, not the old curve.
+    """
+    dex = (token.dex_id or "").lower().replace(".", "").replace("-", "")
+    if dex in ("pumpswap", "raydium", "meteora", "meteoradbc", "orca"):
+        return False
+    if token.complete:
+        return False
+    if dex in ("pumpfun", "pump"):
+        return True
+    # Direct Pump API discoveries can be curve tokens before a DEX id exists.
+    return token.source.startswith("pump") and not token.pair_url
+
+
 def pump_enrich(token: Token) -> bool:
     """Load Pump's own bonding-curve state for a known mint."""
-    if not is_pump_token(token):
+    if not is_live_pump_curve(token):
         return False
     try:
         raw = http_get(f"{PUMP_API}/coins-v2/{token.mint}", timeout=10)
@@ -316,7 +333,7 @@ def pump_exit_estimate(token: Token, notional_usd: float) -> tuple[float, float]
 def exit_estimates(token: Token) -> list[tuple[int, float, float]]:
     rows: list[tuple[int, float, float]] = []
     for size in (1000, 10000, 100000):
-        if is_pump_token(token) and not token.complete:
+        if is_live_pump_curve(token):
             proceeds, impact = pump_exit_estimate(token, float(size))
         else:
             proceeds, impact = dex_exit_estimate(token.liquidity_usd, float(size))
@@ -1233,7 +1250,8 @@ def format_alert(t: Token) -> str:
     pump = f"https://pump.fun/coin/{t.mint}"
     primary_url = t.pair_url or (pump if pump_like else dex)
     venue = html.escape(t.dex_id or ("Pump" if pump_like else t.source))
-    state_text = ("Migrated" if t.complete else "Bonding") if pump_like else "DEX pool"
+    curve_live = is_live_pump_curve(t)
+    state_text = "Bonding" if curve_live else "DEX pool"
     gmgn = f"https://gmgn.ai/sol/token/{t.mint}"
     birdeye = f"https://birdeye.so/token/{t.mint}?chain=solana"
     solscan = f"https://solscan.io/token/{t.mint}"
@@ -1301,7 +1319,7 @@ def format_alert(t: Token) -> str:
         lines.append(
             f"{branch} \${size//1000}K → <b>\${proceeds:,.0f}</b> · impact {impact:.0f}%"
         )
-    if pump_like and not t.complete:
+    if curve_live:
         lines.append(f"└ Curve real SOL <b>{t.real_sol:.2f}</b>")
 
     lines.extend([
