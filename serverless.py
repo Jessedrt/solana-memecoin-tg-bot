@@ -27,6 +27,7 @@ ENRICH_LIMIT = max(1, min(20, int(os.getenv("MAX_TOKENS_TO_ENRICH", "10"))))
 STATE_KEY = "sol-meme:alert-state"
 CHAT_KEY = "sol-meme:chat-id"
 STATS_KEY = "sol-meme:last-stats"
+SCANNER_ENABLED_KEY = "sol-meme:scanner-enabled"
 LOCK_KEY = "sol-meme:scan-lock"
 PERFORMANCE_KEY = "sol-meme:performance"
 PERFORMANCE_REFRESH_KEY = "sol-meme:performance:last-refresh"
@@ -191,16 +192,38 @@ def production_base_url() -> str:
     return f"https://{host.rstrip('/')}"
 
 
+def set_scanner_enabled(enabled: bool) -> None:
+    if has_redis():
+        redis_command("SET", SCANNER_ENABLED_KEY, "1" if enabled else "0")
+
+def scanner_enabled() -> bool:
+    if not has_redis():
+        return False
+    try:
+        raw = redis_command("GET", SCANNER_ENABLED_KEY)
+        # Backward compatibility: Pulse had an active schedule before this key
+        # existed, so absence means ON until /off explicitly stores "0".
+        if raw in (None, ""):
+            return True
+        return str(raw) == "1"
+    except Exception:
+        return False
+
 def scanner_status_text(state_count: int, stats: dict[str, int]) -> str:
     backend = "Redis ✅" if has_redis() else "stateless ⚠️"
+    enabled = "ON 🟢" if scanner_enabled() else "OFF 🔴"
+    finished = int(stats.get("finished_at", 0) or 0)
+    age = max(0, int(time.time()) - finished) if finished else 0
     return (
-        "Scanner status\n"
+        "🟢 PULSE Scanner\n"
         f"• age ≤ {bot.MAX_AGE_MINUTES}m\n"
         f"• mcap {bot.fmt_usd(bot.MIN_MCAP_USD)}–{bot.fmt_usd(bot.MAX_MCAP_USD)}\n"
         f"• min replies {bot.MIN_REPLIES}\n"
         f"• min score {bot.MIN_SCORE}\n"
         f"• still on curve: {bot.REQUIRE_STILL_ON_CURVE}\n"
+        f"• auto scan: {enabled}\n"
         f"• scheduler: {SCAN_CRON}\n"
+        f"• last scan: {age}s ago\n"
         f"• state: {backend}\n"
         f"Last scan: seen {stats.get('seen', 0)}, "
         f"passed {stats.get('filtered', 0)}, "
@@ -397,7 +420,9 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     return stats
 
 
-def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
+def run_scan(*, require_durable_state: bool = True, respect_enabled: bool = False) -> dict[str, int]:
+    if respect_enabled and not scanner_enabled():
+        return {"seen": 0, "filtered": 0, "scored": 0, "alerted": 0, "skipped": 1, "disabled": 1}
     if not bot.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
     if require_durable_state and not has_redis():
@@ -475,10 +500,79 @@ def ensure_qstash_schedule() -> dict[str, Any]:
     )
     r.raise_for_status()
     data = r.json()
+    set_scanner_enabled(True)
     return {
         "configured": True,
         "schedule_id": data.get("scheduleId") or schedule_id,
         "cron": SCAN_CRON,
+        "destination": destination,
+    }
+
+
+def delete_qstash_schedule() -> dict[str, Any]:
+    """Delete Pulse's QStash schedule and mark automatic scanning OFF."""
+    if not QSTASH_TOKEN:
+        return {"disabled": False, "reason": "QSTASH_TOKEN missing"}
+
+    base = production_base_url()
+    destination = f"{base}/api/scan" if base else ""
+    configured_id = os.getenv("QSTASH_SCHEDULE_ID", "solana-memecoin-scanner").strip()
+    headers = {"Authorization": f"Bearer {QSTASH_TOKEN}"}
+
+    schedule_ids: list[str] = []
+    if configured_id:
+        schedule_ids.append(configured_id)
+
+    # Also discover matching schedules so stale/random IDs from older setup
+    # versions cannot keep scanning after /off.
+    try:
+        listing = requests.get(
+            f"{QSTASH_BASE_URL}/v2/schedules",
+            headers=headers,
+            timeout=15,
+        )
+        listing.raise_for_status()
+        rows = listing.json()
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                sid = str(row.get("scheduleId") or "")
+                dest = str(row.get("destination") or "")
+                if sid and (sid == configured_id or (destination and dest == destination)):
+                    schedule_ids.append(sid)
+    except Exception as exc:
+        bot.log.warning("QStash schedule listing failed during /off: %s", exc)
+
+    deleted: list[str] = []
+    failures: list[str] = []
+    for sid in dict.fromkeys(schedule_ids):
+        try:
+            r = requests.delete(
+                f"{QSTASH_BASE_URL}/v2/schedules/{quote(sid, safe='')}",
+                headers=headers,
+                timeout=15,
+            )
+            if r.status_code in (200, 202, 204, 404):
+                if r.status_code != 404:
+                    deleted.append(sid)
+            else:
+                failures.append(f"{sid}:{r.status_code}")
+        except Exception as exc:
+            failures.append(f"{sid}:{type(exc).__name__}")
+
+    if failures:
+        return {
+            "disabled": False,
+            "deleted": deleted,
+            "failures": failures,
+            "reason": "One or more QStash schedules could not be deleted",
+        }
+
+    set_scanner_enabled(False)
+    return {
+        "disabled": True,
+        "deleted": deleted,
         "destination": destination,
     }
 
@@ -541,6 +635,13 @@ def track_alert(token: bot.Token, alerted_at: float | None = None) -> None:
         "last_mcap": entry_mcap,
         "last_price": entry_price,
         "last_checked_at": int(alerted_at),
+        "entry_liquidity": float(token.liquidity_usd or 0),
+        "peak_liquidity": float(token.liquidity_usd or 0),
+        "snapshots": [],
+        "executable_peak_100": 0.0,
+        "executable_peak_1000": 0.0,
+        "executable_peak_10000": 0.0,
+        "classification": "INSUFFICIENT_DATA",
     }
     save_performance(data)
 
@@ -554,6 +655,45 @@ def _record_multiple(rec: dict[str, Any], current_mcap: float, current_price: fl
     elif entry_mcap > 0 and current_mcap > 0:
         multiple = current_mcap / entry_mcap
     return multiple
+
+
+def _executable_snapshot(
+    rec: dict[str, Any],
+    current_mcap: float,
+    current_price: float,
+    current_liquidity: float,
+    stake: float,
+) -> dict[str, float]:
+    """Estimate a round trip from alert-time entry through the current exit."""
+    chart_multiple = _record_multiple(rec, current_mcap, current_price)
+    entry_liquidity = float(rec.get("entry_liquidity") or 0)
+    if chart_multiple <= 0 or entry_liquidity <= 0 or current_liquidity <= 0 or stake <= 0:
+        return {
+            "multiple": 0.0,
+            "marked_value": 0.0,
+            "proceeds": 0.0,
+            "entry_impact_pct": 100.0,
+            "exit_impact_pct": 100.0,
+        }
+
+    # Constant-product approximation: half of reported USD liquidity is the
+    # quote reserve. Entry slippage reduces how much token the original stake
+    # actually acquired relative to the pre-trade spot price.
+    entry_quote = entry_liquidity / 2.0
+    entry_fill = entry_quote / (entry_quote + stake)
+    entry_impact = max(0.0, (1.0 - entry_fill) * 100.0)
+
+    # Value the acquired tokens at the current spot, then estimate liquidating
+    # that ENTIRE position at current liquidity.
+    marked_value = stake * entry_fill * chart_multiple
+    proceeds, exit_impact = bot.dex_exit_estimate(current_liquidity, marked_value)
+    return {
+        "multiple": (proceeds / stake) if proceeds > 0 else 0.0,
+        "marked_value": marked_value,
+        "proceeds": proceeds,
+        "entry_impact_pct": entry_impact,
+        "exit_impact_pct": exit_impact,
+    }
 
 
 def refresh_performance(force: bool = False) -> dict[str, int]:
@@ -595,6 +735,36 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
             rec["last_mcap"] = current_mcap
             rec["last_price"] = current_price
             rec["last_checked_at"] = int(now)
+            rec["last_liquidity"] = float(probe.liquidity_usd or 0)
+            rec.setdefault("snapshots", []).append({"ts": int(now), "price": current_price, "mcap": current_mcap, "liquidity": float(probe.liquidity_usd or 0), "volume_h1": float(probe.volume_h1 or 0)})
+            rec["snapshots"] = rec["snapshots"][-288:]
+            for size in (100, 1000, 10000):
+                executable = _executable_snapshot(
+                    rec,
+                    current_mcap,
+                    current_price,
+                    float(probe.liquidity_usd or 0),
+                    float(size),
+                )
+                key = f"executable_peak_{size}"
+                rec[key] = max(float(rec.get(key) or 0), executable["multiple"])
+                rec[f"exit_{size}"] = {
+                    "marked_value": executable["marked_value"],
+                    "proceeds": executable["proceeds"],
+                    "entry_impact_pct": executable["entry_impact_pct"],
+                    "impact_pct": executable["exit_impact_pct"],
+                    "ts": int(now),
+                }
+            rec["peak_liquidity"] = max(float(rec.get("peak_liquidity") or 0), float(probe.liquidity_usd or 0))
+            # Classification must use the chart multiple from THIS snapshot; peak_multiple
+            # is updated just below, after executable metrics are captured.
+            chart_now = _record_multiple(rec, current_mcap, current_price)
+            if float(rec.get("executable_peak_100") or 0) >= 2:
+                rec["classification"] = "EXECUTABLE_WIN"
+            elif max(float(rec.get("peak_multiple") or 1), chart_now) >= 2 and float(rec.get("executable_peak_100") or 0) < 2:
+                rec["classification"] = "ILLIQUID"
+            else:
+                rec["classification"] = "ACTIVE"
             rec["peak_mcap"] = max(float(rec.get("peak_mcap") or 0), current_mcap)
             rec["peak_price"] = max(float(rec.get("peak_price") or 0), current_price)
             multiple = _record_multiple(rec, current_mcap, current_price)
@@ -618,12 +788,16 @@ def format_performance_report(day: str, *, interim: bool = False) -> str:
     alerts = list((bucket.get("alerts") or {}).values())
     alerts.sort(key=lambda r: float(r.get("peak_multiple") or 0), reverse=True)
     winners = [r for r in alerts if float(r.get("peak_multiple") or 0) >= 2]
+    executable = [r for r in alerts if float(r.get("executable_peak_100") or 0) >= 2]
+    illiquid = [r for r in alerts if r.get("classification") == "ILLIQUID"]
 
     title = "📈 PULSE Performance — today" if interim else f"🏁 PULSE Daily Results — {day}"
     lines = [
         title,
         f"Alerts tracked: <b>{len(alerts)}</b>",
-        f"Reached 2x+: <b>{len(winners)}</b>",
+        f"Chart reached 2x+: <b>{len(winners)}</b>",
+        f"Executable $100 2x+: <b>{len(executable)}</b>",
+        f"Illiquid/non-executable: <b>{len(illiquid)}</b>",
     ]
     if not winners:
         lines.append("No tracked alert reached 2x yet." if interim else "No tracked alert reached 2x during the day.")
@@ -641,7 +815,8 @@ def format_performance_report(day: str, *, interim: bool = False) -> str:
         else:
             move = "price-tracked"
         lines.append(
-            f"{i}. <b>{symbol}</b> — <b>{mult:.2f}x</b> peak · {move}\n"
+            f"{i}. <b>{symbol}</b> — chart <b>{mult:.2f}x</b> · {move}\n"
+            f"$100 executable peak: <b>{float(rec.get('executable_peak_100') or 0):.2f}x</b> · {rec.get('classification', '?')}\n"
             f'<a href="https://dexscreener.com/solana/{mint}">DexScreener</a>'
         )
     return "\n".join(lines)

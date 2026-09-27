@@ -69,6 +69,7 @@ def _create_qstash_schedule(base: str) -> dict:
     )
     r.raise_for_status()
     data = r.json()
+    serverless.set_scanner_enabled(True)
     return {
         "configured": True,
         "schedule_id": data.get("scheduleId") or schedule_id,

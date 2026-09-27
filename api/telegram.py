@@ -66,10 +66,24 @@ class handler(BaseHTTPRequestHandler):
             elif cmd == "/performance":
                 tg.send(serverless.today_performance_text(), chat_id=chat_id)
 
+            elif cmd == "/status":
+                tg.send(serverless.scanner_status_text(len(serverless.load_alert_state()), serverless.load_last_stats()), chat_id=chat_id)
+
+            elif cmd == "/off":
+                result = serverless.delete_qstash_schedule()
+                if result.get("disabled"):
+                    tg.send("🔴 Pulse auto scanner OFF · QStash schedule disabled.", chat_id=chat_id)
+                else:
+                    bot.log.warning("Could not disable scanner: %s", result)
+                    tg.send("⚠️ Pulse could not fully disable automatic scanning. Check logs.", chat_id=chat_id)
+
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
                 if not result.get("configured"):
                     bot.log.warning("Could not enable schedule: %s", result.get("reason", "unknown"))
+                else:
+                    serverless.set_scanner_enabled(True)
+                    tg.send(f"🟢 Pulse auto scanner ON · {result.get('cron', 'scheduled')}", chat_id=chat_id)
 
             else:
                 # Strict alert-only mode: all other Telegram commands are ignored silently.
