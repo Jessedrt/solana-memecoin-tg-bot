@@ -352,29 +352,35 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             or token.complete
             or token.pump_checked
         )
+        market_liquidity_checked = (
+            (bot.is_pump_token(token) and not token.complete and token.pump_checked and token.real_sol > 0)
+            or token.liquidity_usd > 0
+        )
         core_checked = (
-            token.rug_score is not None
-            and token.price_usd > 0
+            token.price_usd > 0
             and token.usd_mcap > 0
-            and token.liquidity_usd > 0
             and token.created_ms > 0
             and pump_curve_ok
+            and market_liquidity_checked
         )
         exit_ok = bot.has_exit_capacity(token)
 
         # Cheap gates first. Only coins that could be alerted receive the
         # heavier full RugCheck structural report.
+        rug_regular_ok = token.rug_score is None or token.rug_score <= 40
+        rug_early_ok = token.rug_score is None or token.rug_score <= 30
+
         regular_candidate = (
             token.score >= bot.MIN_SCORE
             and core_checked
             and exit_ok
-            and token.rug_score <= 40
+            and rug_regular_ok
         )
         early_candidate = (
             token.early_score >= bot.PRE_PUMP_MIN_SCORE
             and core_checked
             and exit_ok
-            and token.rug_score <= 30
+            and rug_early_ok
             and token.price_change_m5 < 80
         )
         if not core_checked:
@@ -383,7 +389,7 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             stats["fail_exit"] += 1
         if token.score < bot.MIN_SCORE:
             stats["fail_score"] += 1
-        if token.rug_score is None or token.rug_score > 40:
+        if token.rug_score is not None and token.rug_score > 40:
             stats["fail_rug"] += 1
         if token.early_score < bot.PRE_PUMP_MIN_SCORE:
             stats["fail_early"] += 1
@@ -407,30 +413,37 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             continue
         stats["candidates"] += 1
 
-        if not bot.rugcheck_full_enrich(token):
-            bot.log.info("blocked %s: full RugCheck unavailable", token.mint)
-            continue
-
-        structural_ok = bot.structural_safety_ok(token)
+        rug_full_available = bot.rugcheck_full_enrich(token)
+        rug_structural_ok = bot.structural_safety_ok(token) if rug_full_available else None
         momentum_ok = bot.momentum_not_extended(token)
 
         prev_liq = float(previous.get("liquidity_usd") or 0)
         liquidity_stable = not (
             prev_liq > 0
+            and token.liquidity_usd > 0
             and token.liquidity_usd < prev_liq * 0.80
         )
 
+        # Solana Tracker is the required second opinion. It also becomes the
+        # structural fallback for very fresh mints RugCheck has not indexed yet.
+        cached = deep_dd_cache.get(token.mint) or {}
+        cached_ts = float(cached.get("ts") or 0) if isinstance(cached, dict) else 0
+        dd_data = cached.get("data") if isinstance(cached, dict) and now - cached_ts <= 300 else None
+        if not isinstance(dd_data, dict):
+            dd_data = bot.solana_tracker_due_diligence(token)
+            deep_dd_cache[token.mint] = {"ts": int(now), "data": dd_data}
+        bot.apply_deep_dd(token, dd_data)
+        deep_dd_ok = bot.deep_due_diligence_ok(token)
+
+        structural_ok = (
+            bool(rug_structural_ok)
+            if rug_full_available
+            else bot.tracker_structural_fallback_ok(token)
+        )
         base_safe = structural_ok and momentum_ok and liquidity_stable
+
         if base_safe:
             stats["structural_pass"] += 1
-            cached = deep_dd_cache.get(token.mint) or {}
-            cached_ts = float(cached.get("ts") or 0) if isinstance(cached, dict) else 0
-            dd_data = cached.get("data") if isinstance(cached, dict) and now - cached_ts <= 300 else None
-            if not isinstance(dd_data, dict):
-                dd_data = bot.solana_tracker_due_diligence(token)
-                deep_dd_cache[token.mint] = {"ts": int(now), "data": dd_data}
-            bot.apply_deep_dd(token, dd_data)
-        deep_dd_ok = bot.deep_due_diligence_ok(token)
         if deep_dd_ok:
             stats["deep_dd_pass"] += 1
 
@@ -440,15 +453,19 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
         if not (regular_alert or early_alert):
             bot.log.info(
                 "blocked %s safety structural=%s momentum=%s liq_stable=%s "
-                "rug=%s top10=%.1f max_holder=%.1f lp_lock=%s deep_dd=%s dd_reasons=%s",
+                "rug=%s rug_full=%s top10=%.1f max_holder=%.1f lp_lock=%s "
+                "tracker_top10=%.1f tracker_dev=%.1f deep_dd=%s dd_reasons=%s",
                 token.mint,
                 structural_ok,
                 momentum_ok,
                 liquidity_stable,
                 token.rug_score,
+                rug_full_available,
                 token.top10_pct,
                 token.largest_holder_pct,
                 token.lp_locked_pct,
+                token.tracker_top10_pct,
+                token.tracker_dev_pct,
                 token.deep_dd_checked,
                 token.deep_dd_reasons,
             )
