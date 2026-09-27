@@ -118,6 +118,11 @@ class Token:
     bundler_pct: float = 0.0
     tracker_insider_pct: float = 0.0
     tracker_sniper_pct: float = 0.0
+    tracker_top10_pct: float = 0.0
+    tracker_dev_pct: float = 0.0
+    tracker_rugged: bool = False
+    tracker_risk_score: float = 0.0
+    tracker_danger_risks: list[str] = field(default_factory=list)
     cheap_unsold_top10_count: int = 0
     cheap_unsold_top10_pct: float = 0.0
     top10_entry_mcap_min: float = 0.0
@@ -367,6 +372,11 @@ def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
 
         insider_pct = 0.0
         sniper_pct = 0.0
+        tracker_top10 = 0.0
+        tracker_dev = 0.0
+        tracker_rugged = False
+        tracker_risk_score = 0.0
+        tracker_danger_risks: list[str] = []
         if isinstance(risk, dict):
             insiders = risk.get("insiders") or {}
             snipers = risk.get("snipers") or {}
@@ -374,6 +384,19 @@ def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
                 insider_pct = float(insiders.get("totalPercentage") or insiders.get("percentage") or 0)
             if isinstance(snipers, dict):
                 sniper_pct = float(snipers.get("totalPercentage") or snipers.get("percentage") or 0)
+            tracker_top10 = float(risk.get("top10") or 0)
+            dev_risk = risk.get("dev") or {}
+            if isinstance(dev_risk, dict):
+                tracker_dev = float(dev_risk.get("percentage") or 0)
+            tracker_rugged = bool(risk.get("rugged"))
+            tracker_risk_score = float(risk.get("score") or 0)
+            for item in risk.get("risks") or []:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("level") or "").lower() == "danger":
+                    name = str(item.get("name") or item.get("description") or "").strip()
+                    if name:
+                        tracker_danger_risks.append(name)
 
         holders = tracker_get(f"/tokens/{token.mint}/holders", {"enrich": "all"})
         accounts = holders.get("accounts") if isinstance(holders, dict) else []
@@ -419,7 +442,7 @@ def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
 
         dev_count = dev_24h = dev_live = dev_dead = 0
         if deployer:
-            dev = tracker_get(f"/deployer/{deployer}", {"format": "full", "limit": 50})
+            dev = tracker_get(f"/deployer/{deployer}", {"limit": 50})
             rows = dev.get("tokens") if isinstance(dev, dict) else []
             rows = rows if isinstance(rows, list) else []
             prior = [x for x in rows if isinstance(x, dict) and str(x.get("mint") or "") != token.mint]
@@ -460,6 +483,11 @@ def solana_tracker_due_diligence(token: Token) -> dict[str, Any]:
             "bundler_pct": bundler_pct,
             "tracker_insider_pct": insider_pct,
             "tracker_sniper_pct": sniper_pct,
+            "tracker_top10_pct": tracker_top10,
+            "tracker_dev_pct": tracker_dev,
+            "tracker_rugged": tracker_rugged,
+            "tracker_risk_score": tracker_risk_score,
+            "tracker_danger_risks": tracker_danger_risks,
             "cheap_unsold_top10_count": cheap_count,
             "cheap_unsold_top10_pct": cheap_pct,
             "top10_entry_mcap_min": entry_min,
@@ -483,6 +511,11 @@ def apply_deep_dd(token: Token, data: dict[str, Any]) -> None:
     token.bundler_pct = float(data.get("bundler_pct") or 0)
     token.tracker_insider_pct = float(data.get("tracker_insider_pct") or 0)
     token.tracker_sniper_pct = float(data.get("tracker_sniper_pct") or 0)
+    token.tracker_top10_pct = float(data.get("tracker_top10_pct") or 0)
+    token.tracker_dev_pct = float(data.get("tracker_dev_pct") or 0)
+    token.tracker_rugged = bool(data.get("tracker_rugged"))
+    token.tracker_risk_score = float(data.get("tracker_risk_score") or 0)
+    token.tracker_danger_risks = [str(x) for x in (data.get("tracker_danger_risks") or [])]
     token.cheap_unsold_top10_count = int(data.get("cheap_unsold_top10_count") or 0)
     token.cheap_unsold_top10_pct = float(data.get("cheap_unsold_top10_pct") or 0)
     token.top10_entry_mcap_min = float(data.get("top10_entry_mcap_min") or 0)
@@ -494,7 +527,19 @@ def apply_deep_dd(token: Token, data: dict[str, Any]) -> None:
 def deep_due_diligence_ok(token: Token) -> bool:
     if not token.deep_dd_checked:
         return not REQUIRE_DEEP_DD
+    if token.tracker_rugged:
+        return False
+    if token.tracker_top10_pct > 45:
+        return False
+    if token.tracker_dev_pct > 5:
+        return False
+    if token.tracker_insider_pct > 10:
+        return False
+    if token.tracker_sniper_pct > 15:
+        return False
     if token.bundler_pct > MAX_BUNDLER_PCT:
+        return False
+    if token.tracker_danger_risks:
         return False
     if token.cheap_unsold_top10_count > MAX_CHEAP_UNSOLD_TOP10_COUNT:
         return False
@@ -507,6 +552,13 @@ def deep_due_diligence_ok(token: Token) -> bool:
     if token.dev_launch_count >= 3 and token.dev_dead_count / max(token.dev_launch_count, 1) >= 0.70:
         return False
     return True
+
+
+def tracker_structural_fallback_ok(token: Token) -> bool:
+    """Fallback when RugCheck has not indexed a fresh mint yet."""
+    if not token.deep_dd_checked:
+        return False
+    return deep_due_diligence_ok(token)
 
 
 def rugcheck_new() -> list[dict[str, Any]]:
@@ -1229,7 +1281,8 @@ def format_alert(t: Token) -> str:
 
     lines.extend([
         "🧬 <b>Deep DD</b>",
-        f"├ Bundlers <b>{t.bundler_pct:.1f}%</b> · Insiders <b>{t.tracker_insider_pct:.1f}%</b>",
+        f"├ Bundlers <b>{t.bundler_pct:.1f}%</b> · Insiders <b>{t.tracker_insider_pct:.1f}%</b> · Snipers <b>{t.tracker_sniper_pct:.1f}%</b>",
+        f"├ Top10 <b>{t.tracker_top10_pct:.1f}%</b> · Dev hold <b>{t.tracker_dev_pct:.1f}%</b>",
         f"├ Dev <b>{t.dev_launch_count}</b> prior · <b>{t.dev_launches_24h}</b>/24h · survivors <b>{t.dev_survivor_count}</b>",
         f"├ Cheap unsold top10 <b>{t.cheap_unsold_top10_count}</b> · {t.cheap_unsold_top10_pct:.1f}%",
         (
