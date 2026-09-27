@@ -70,8 +70,12 @@ class handler(BaseHTTPRequestHandler):
                 tg.send(serverless.scanner_status_text(len(serverless.load_alert_state()), serverless.load_last_stats()), chat_id=chat_id)
 
             elif cmd == "/off":
-                serverless.set_scanner_enabled(False)
-                tg.send("🔴 Pulse auto scanner marked OFF.", chat_id=chat_id)
+                result = serverless.delete_qstash_schedule()
+                if result.get("disabled"):
+                    tg.send("🔴 Pulse auto scanner OFF · QStash schedule disabled.", chat_id=chat_id)
+                else:
+                    bot.log.warning("Could not disable scanner: %s", result)
+                    tg.send("⚠️ Pulse could not fully disable automatic scanning. Check logs.", chat_id=chat_id)
 
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
