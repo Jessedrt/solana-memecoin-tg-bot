@@ -632,9 +632,12 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
                 rec[key] = max(float(rec.get(key) or 0), executable)
                 rec[f"exit_{size}"] = {"proceeds": proceeds, "impact_pct": impact, "ts": int(now)}
             rec["peak_liquidity"] = max(float(rec.get("peak_liquidity") or 0), float(probe.liquidity_usd or 0))
+            # Classification must use the chart multiple from THIS snapshot; peak_multiple
+            # is updated just below, after executable metrics are captured.
+            chart_now = _record_multiple(rec, current_mcap, current_price)
             if float(rec.get("executable_peak_100") or 0) >= 2:
                 rec["classification"] = "EXECUTABLE_WIN"
-            elif float(rec.get("peak_multiple") or 1) >= 2 and float(rec.get("executable_peak_100") or 0) < 2:
+            elif max(float(rec.get("peak_multiple") or 1), chart_now) >= 2 and float(rec.get("executable_peak_100") or 0) < 2:
                 rec["classification"] = "ILLIQUID"
             else:
                 rec["classification"] = "ACTIVE"
