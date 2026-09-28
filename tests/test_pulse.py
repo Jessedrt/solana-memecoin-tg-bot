@@ -8,6 +8,7 @@ import requests
 
 from pulse.config import PulseConfig
 from pulse.engine import PulseEngine
+from pulse.discovery import assign_discovery_lane
 from pulse.evaluation import (
     demand_quality,
     evaluate,
@@ -28,13 +29,14 @@ def safe_token() -> NormalizedToken:
     return NormalizedToken(
         mint=MINT, name="Pulse Test", symbol="PULSE", created_at=now - 20 * 60,
         price_usd=.0001, market_cap=75_000, liquidity_usd=28_000,
-        volume_m5=17_000, buys_m5=127, sells_m5=40, txns_m5=167,
+        volume_m5=17_000, volume_h1=20_000, buys_m5=127, sells_m5=40, txns_m5=167,
         price_change_m5=15, price_change_h1=35, social_score=80,
         mint_authority_active=False, freeze_authority_active=False, rugged=False,
         top10_pct=30, top20_pct=42, largest_holder_pct=8, creator_pct=2,
         related_wallet_pct=5, sniper_pct=3, bundled_pct=2, holder_count=500,
         wallet_cluster_score=.1, wash_trading_score=.1, creator_dumping=False,
         creator_risk="LOW", pair_url="https://dexscreener.com/solana/test",
+        migrated=False, launchpad="PumpFun", has_socials=True,
         sources={
             "pumpfun": Observation("pumpfun", now, {"market_cap": 75_000}),
             "dexscreener": Observation("dexscreener", now, {"market_cap": 75_000}),
@@ -243,6 +245,60 @@ class EvaluationTests(unittest.TestCase):
         self.assertLess(len(alert.splitlines()), 15)
         self.assertNotIn("% chance", alert)
         self.assertNotIn("{\"", alert)
+
+
+class DiscoveryLaneTests(unittest.TestCase):
+    def test_new_token_preset(self):
+        token = safe_token()
+        self.assertEqual(assign_discovery_lane(token), "NEW_TOKEN")
+
+    def test_new_token_requires_socials(self):
+        token = safe_token()
+        token.has_socials = False
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_new_token_rejects_dev_over_three_percent(self):
+        token = safe_token()
+        token.creator_pct = 3.1
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_new_token_rejects_snipers_over_five_percent(self):
+        token = safe_token()
+        token.sniper_pct = 5.1
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_about_to_graduate_preset(self):
+        token = safe_token()
+        token.market_cap = 25_000
+        token.holder_count = 200
+        token.sniper_pct = 10
+        token.has_socials = False
+        token.volume_h1 = 16_000
+        self.assertEqual(assign_discovery_lane(token), "ABOUT_TO_GRADUATE")
+
+    def test_about_to_graduate_allows_no_socials(self):
+        token = safe_token()
+        token.market_cap = 25_000
+        token.holder_count = 200
+        token.sniper_pct = 10
+        token.has_socials = False
+        token.volume_h1 = 16_000
+        self.assertEqual(assign_discovery_lane(token), "ABOUT_TO_GRADUATE")
+
+    def test_migrated_preset(self):
+        token = safe_token()
+        token.market_cap = 50_000
+        token.migrated = True
+        self.assertEqual(assign_discovery_lane(token), "MIGRATED")
+
+    def test_token_without_a_lane_cannot_alert(self):
+        token = safe_token()
+        token.has_socials = False
+        token.migrated = False
+        token.market_cap = 75_000
+        decision = evaluate(token, PulseConfig())
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
 
 
 class DexScreenerProviderTests(unittest.TestCase):

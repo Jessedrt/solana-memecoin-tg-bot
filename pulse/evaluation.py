@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from .config import PulseConfig
+from .discovery import assign_discovery_lane
 from .models import (
     CandidateDecision,
     Executability,
@@ -266,6 +267,7 @@ def source_states(t: NormalizedToken, cfg: PulseConfig) -> dict[str, str]:
 
 
 def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
+    assign_discovery_lane(t)
     safety = hard_rug_gate(t, cfg)
     components, coverage = _component_scores(t, safety, cfg)
     raw_score = sum(components.values())
@@ -332,6 +334,7 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
         and age_ok
         and move_ok
         and momentum != "DECLINING"
+        and t.discovery_lane is not None
     )
 
     classification = (
