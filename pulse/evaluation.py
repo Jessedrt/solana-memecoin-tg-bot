@@ -318,7 +318,8 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
         score = min(score, 74)
 
     evidence_pct = evidence_confidence * 100
-    hard_max_market_cap = min(cfg.max_market_cap, 100_000)\n    market_cap_ok = t.market_cap is not None and cfg.min_market_cap <= t.market_cap <= hard_max_market_cap
+    hard_max_market_cap = min(cfg.max_market_cap, 100_000)
+    market_cap_ok = t.market_cap is not None and cfg.min_market_cap <= t.market_cap <= hard_max_market_cap
     holders_ok = t.holder_count is not None and t.holder_count >= cfg.min_holders
     age_ok = t.age_minutes is not None and cfg.min_age_minutes <= t.age_minutes <= cfg.max_age_minutes
     move_ok = (
