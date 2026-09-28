@@ -135,7 +135,7 @@ class PulseEngine:
         decision = evaluate(token, self.config)
         decision.reasoning = structured_reasoning(token, decision)
         event = "REJECTED" if decision.rejected_reason else "EVALUATED"
-        log.info("%%s mint=%%s score=%%s classification=%%s reason=%%s", event, token.mint, decision.score, decision.classification, decision.rejected_reason or "none")
+        log.info("%s mint=%s score=%s classification=%s reason=%s", event, token.mint, decision.score, decision.classification, decision.rejected_reason or "none")
         return decision
 
     def scan(self, history_loader: Callable[[str], list[MarketWindow]] | None = None) -> list[tuple[NormalizedToken, CandidateDecision]]:
