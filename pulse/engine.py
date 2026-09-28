@@ -52,7 +52,7 @@ class PulseEngine:
             target = merged[token.mint]
             for name, obs in token.sources.items():
                 target.sources[name] = obs
-            for field in ("name", "symbol", "created_at", "market_cap", "price_usd", "liquidity_usd", "bonding_progress", "migrated", "creator", "holder_count", "image_url"):
+            for field in ("name", "symbol", "created_at", "market_cap", "price_usd", "liquidity_usd", "bonding_progress", "migrated", "launchpad", "dex_id", "has_socials", "creator", "holder_count", "image_url"):
                 old, new = getattr(target, field), getattr(token, field)
                 if old in (None, "", "?") and new not in (None, "", "?"):
                     setattr(target, field, new)
