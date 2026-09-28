@@ -81,6 +81,10 @@ class NormalizedToken:
     price_change_h24: float | None = None
     bonding_progress: float | None = None
     migrated: bool | None = None
+    launchpad: str | None = None
+    dex_id: str | None = None
+    has_socials: bool | None = None
+    discovery_lane: str | None = None
     creator: str | None = None
     social_score: float | None = None
     attention_acceleration: float | None = None
