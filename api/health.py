@@ -20,6 +20,8 @@ class handler(BaseHTTPRequestHandler):
             "solana_tracker": bool(bot.SOLANA_TRACKER_API_KEY),
             "deep_dd_required": bool(bot.REQUIRE_DEEP_DD),
             "scheduler": serverless.SCAN_CRON,
+            "scanner_enabled": serverless.scanner_enabled(),
+            "providers": serverless.provider_health(),
         }
         body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
@@ -28,3 +30,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+

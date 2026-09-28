@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -69,9 +69,12 @@ def _create_qstash_schedule(base: str) -> dict:
     )
     r.raise_for_status()
     data = r.json()
+    actual_id = data.get("scheduleId") or schedule_id
+    serverless.save_json(serverless.QSTASH_SCHEDULE_KEY, {"schedule_id": actual_id, "destination": destination})
+    serverless.set_scanner_enabled(True)
     return {
         "configured": True,
-        "schedule_id": data.get("scheduleId") or schedule_id,
+        "schedule_id": actual_id,
         "cron": serverless.SCAN_CRON,
         "destination": destination,
     }
@@ -116,3 +119,4 @@ class handler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             self._reply(500, {"ok": False, "error": str(exc)[:500]})
+

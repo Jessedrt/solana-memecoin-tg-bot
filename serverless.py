@@ -8,10 +8,13 @@ import time
 from typing import Any
 from urllib.parse import quote
 
-import requests
 import redis as redis_lib
+import requests
 
 import bot
+from pulse import PulseEngine
+from pulse.formatting import format_alert as format_pulse_alert
+from pulse.models import MarketWindow, NormalizedToken
 
 REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip() or os.getenv("KV_REST_API_URL", "").strip()
 REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip() or os.getenv("KV_REST_API_TOKEN", "").strip()
@@ -32,6 +35,12 @@ PERFORMANCE_KEY = "sol-meme:performance"
 PERFORMANCE_REFRESH_KEY = "sol-meme:performance:last-refresh"
 SIGNAL_SNAPSHOT_KEY = "sol-meme:early-signal-snapshots"
 DEEP_DD_CACHE_KEY = "sol-meme:deep-dd-cache"
+PULSE_HISTORY_KEY = "pulse:market-history"
+PULSE_EVALUATIONS_KEY = "pulse:evaluations"
+PULSE_ALERTS_KEY = "pulse:alerts"
+PULSE_PROVIDER_HEALTH_KEY = "pulse:provider-health"
+SCANNER_ENABLED_KEY = "pulse:scanner-enabled"
+QSTASH_SCHEDULE_KEY = "pulse:qstash-schedule-id"
 PERFORMANCE_REFRESH_SECONDS = max(120, int(os.getenv("PERFORMANCE_REFRESH_SECONDS", "300")))
 REPORT_TZ_OFFSET_HOURS = int(os.getenv("REPORT_TZ_OFFSET_HOURS", "1"))
 
@@ -208,6 +217,54 @@ def scanner_status_text(state_count: int, stats: dict[str, int]) -> str:
         f"alerted {stats.get('alerted', 0)}\n"
         f"Known cooldown entries: {state_count}"
     )
+
+
+def scanner_enabled() -> bool:
+    if not has_redis():
+        return True
+    value = redis_command("GET", SCANNER_ENABLED_KEY)
+    return str(value if value is not None else "1") != "0"
+
+
+def set_scanner_enabled(enabled: bool) -> bool:
+    if not has_redis():
+        return False
+    redis_command("SET", SCANNER_ENABLED_KEY, "1" if enabled else "0")
+    return True
+
+
+def provider_health() -> dict[str, Any]:
+    value = load_json(PULSE_PROVIDER_HEALTH_KEY, {})
+    return value if isinstance(value, dict) else {}
+
+
+def pulse_status_text() -> str:
+    stats = load_last_stats()
+    health = provider_health()
+    perf = load_performance()
+    today_alerts = (((perf.get("days") or {}).get(local_day_key()) or {}).get("alerts") or {})
+    lines = [
+        "🟢 PULSE ONLINE" if scanner_enabled() else "⏸ PULSE PAUSED",
+        f"Scanner: {'ON' if scanner_enabled() else 'OFF'}",
+        "TODAY",
+        f"Discovered: {stats.get('discovered', 0)}",
+        f"Evaluated: {stats.get('evaluated', 0)}",
+        f"Rug Rejects: {stats.get('rejected', 0)}",
+        f"Watch: {stats.get('watch', 0)}",
+        f"Strong Watch: {stats.get('strong_watch', 0)}",
+        f"High Conviction: {stats.get('high_conviction', 0)}",
+        "ALERT RESULTS",
+        f"1.5×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 1.5)}",
+        f"2×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 2)}",
+        f"3×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 3)}",
+        f"Rugs after alert: {sum(1 for r in today_alerts.values() if r.get('rugged'))}",
+        "PROVIDERS",
+    ]
+    display = {"dexscreener": "DexScreener", "pumpfun": "Pump.fun", "gmgn": "GMGN", "fomo": "Fomo", "solana": "Solana RPC"}
+    for key, label in display.items():
+        state = str((health.get(key) or {}).get("state") or "UNKNOWN")
+        lines.append(f"{label}: {state}")
+    return "\n".join(lines)
 
 
 def _candidate_priority(t: bot.Token) -> float:
@@ -605,11 +662,198 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     return stats
 
 
+def _pulse_history() -> dict[str, list[dict[str, Any]]]:
+    value = load_json(PULSE_HISTORY_KEY, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _market_window(token: NormalizedToken, observed_at: float) -> MarketWindow:
+    return MarketWindow(
+        observed_at=observed_at,
+        # DexScreener reports transaction counts, not distinct wallets. Do not
+        # mislabel buys as unique buyers.
+        unique_buyers=None,
+        unique_sellers=None,
+        buy_volume=None,
+        sell_volume=None,
+        transactions=token.txns_m5,
+        liquidity=token.liquidity_usd,
+        price=token.price_usd,
+        market_cap=token.market_cap,
+    )
+
+
+def _legacy_due_diligence(token: NormalizedToken) -> None:
+    """Map existing verified RugCheck/Solana Tracker evidence into the new model."""
+    legacy = bot.Token(
+        mint=token.mint,
+        name=token.name,
+        symbol=token.symbol,
+        source="pulse-due-diligence",
+        usd_mcap=float(token.market_cap or 0),
+        price_usd=float(token.price_usd or 0),
+        liquidity_usd=float(token.liquidity_usd or 0),
+    )
+    try:
+        if bot.rugcheck_full_enrich(legacy):
+            token.rugged = legacy.rugged
+            token.mint_authority_active = token.mint_authority_active if token.mint_authority_active is not None else legacy.mint_authority_active
+            token.freeze_authority_active = token.freeze_authority_active if token.freeze_authority_active is not None else legacy.freeze_authority_active
+            token.top10_pct = token.top10_pct if token.top10_pct is not None else legacy.top10_pct
+            token.largest_holder_pct = token.largest_holder_pct if token.largest_holder_pct is not None else legacy.largest_holder_pct
+    except Exception as exc:
+        bot.log.warning("provider_failure provider=rugcheck mint=%s error=%s", token.mint, type(exc).__name__)
+    if not bot.SOLANA_TRACKER_API_KEY:
+        return
+    data = bot.solana_tracker_due_diligence(legacy)
+    if not data.get("checked"):
+        return
+    bot.apply_deep_dd(legacy, data)
+    token.creator = token.creator or legacy.deployer_wallet or None
+    token.creator_pct = legacy.tracker_dev_pct
+    token.top10_pct = max(token.top10_pct or 0, legacy.tracker_top10_pct or 0) or token.top10_pct
+    token.bundled_pct = legacy.bundler_pct
+    token.sniper_pct = legacy.tracker_sniper_pct
+    token.rugged = token.rugged or legacy.tracker_rugged
+    token.mint_authority_active = token.mint_authority_active or legacy.tracker_mint_authority_active
+    token.freeze_authority_active = token.freeze_authority_active or legacy.tracker_freeze_authority_active
+    token.creator_prior_launches = legacy.dev_launch_count
+    token.creator_failed_launches = legacy.dev_dead_count
+    if legacy.tracker_rugged or legacy.dev_launches_24h >= bot.SERIAL_DEV_LAUNCHES_24H:
+        token.creator_risk = "CRITICAL"
+    elif legacy.dev_dead_count >= 3 and legacy.dev_survivor_count == 0:
+        token.creator_risk = "HIGH"
+    elif legacy.dev_launch_count > 0 and legacy.dev_dead_count <= legacy.dev_survivor_count:
+        token.creator_risk = "LOW"
+    else:
+        token.creator_risk = "UNKNOWN"
+
+
+def _record_evaluation(token: NormalizedToken, decision: Any, now: float) -> None:
+    data = load_json(PULSE_EVALUATIONS_KEY, [])
+    rows = data if isinstance(data, list) else []
+    rows.append({
+        "timestamp": int(now), "mint": token.mint, "token": token.symbol,
+        "price": token.price_usd, "market_cap": token.market_cap,
+        "liquidity": token.liquidity_usd, "score": decision.score,
+        "classification": decision.classification, "safety": decision.safety.status.value,
+        "components": decision.components, "demand_quality": decision.demand_quality,
+        "momentum": decision.momentum, "source_states": decision.source_states,
+        "rejected_reason": decision.rejected_reason,
+    })
+    cutoff = now - 86400 * 45
+    rows = [row for row in rows[-5000:] if float(row.get("timestamp") or 0) >= cutoff]
+    save_json(PULSE_EVALUATIONS_KEY, rows, ttl_seconds=86400 * 46)
+
+
+def _should_alert(token: NormalizedToken, decision: Any, alerts: dict[str, Any], cfg: Any) -> bool:
+    if not decision.alert:
+        return False
+    prior = alerts.get(token.mint)
+    if not isinstance(prior, dict):
+        return True
+    rank = {"WATCH": 1, "STRONG_WATCH": 2, "HIGH_CONVICTION": 3}
+    upgraded = rank.get(decision.classification, 0) > rank.get(str(prior.get("classification")), 0)
+    score_jump = decision.score >= int(prior.get("score") or 0) + cfg.re_alert_score_delta
+    new_sources = set(decision.source_states) - set(prior.get("confirmed_sources") or [])
+    material_source = any(decision.source_states.get(name) == "CONFIRMED" for name in new_sources)
+    return upgraded or score_jump or material_source
+
+
+def track_pulse_alert(token: NormalizedToken, decision: Any, alerted_at: float) -> None:
+    if not has_redis():
+        return
+    data = load_performance()
+    day = local_day_key(alerted_at)
+    bucket = data.setdefault("days", {}).setdefault(day, {"reported": False, "alerts": {}})
+    rec = bucket.setdefault("alerts", {}).setdefault(token.mint, {})
+    rec.update({
+        "mint": token.mint, "symbol": token.symbol, "name": token.name,
+        "alerted_at": int(alerted_at), "entry_mcap": float(token.market_cap or 0),
+        "entry_price": float(token.price_usd or 0), "entry_liquidity": float(token.liquidity_usd or 0),
+        "peak_mcap": float(token.market_cap or 0), "peak_price": float(token.price_usd or 0),
+        "min_price": float(token.price_usd or 0), "peak_multiple": 1.0,
+        "max_drawdown_pct": 0.0, "score": decision.score,
+        "classification": decision.classification, "safety": decision.safety.status.value,
+        "wallet_metrics": {"demand_quality": decision.demand_quality},
+        "momentum_metrics": {"momentum": decision.momentum},
+        "checkpoints": {}, "time_to_1_5x": None, "time_to_2x": None,
+        "time_to_3x": None, "executable_3x": False, "rugged": False,
+        "liquidity_deterioration": False,
+    })
+    save_performance(data)
+
+
+def pulse_scan_once(tg: bot.Telegram) -> dict[str, int]:
+    engine = PulseEngine()
+    now = time.time()
+    histories = _pulse_history()
+    alerts = load_json(PULSE_ALERTS_KEY, {})
+    alerts = alerts if isinstance(alerts, dict) else {}
+    tokens = engine.discover()
+    tokens.sort(key=engine._guideline_priority, reverse=True)
+    stats = {"discovered": len(tokens), "evaluated": 0, "rejected": 0, "watch": 0, "strong_watch": 0, "high_conviction": 0, "alerted": 0}
+    for token in tokens[: engine.config.max_candidates]:
+        engine.enrich(token)
+        _legacy_due_diligence(token)
+        old_rows = histories.get(token.mint) or []
+        windows: list[MarketWindow] = []
+        for row in old_rows[-2:]:
+            try:
+                windows.append(MarketWindow(**row))
+            except (TypeError, ValueError):
+                continue
+        current = _market_window(token, now)
+        windows.append(current)
+        decision = engine.evaluate(token, windows)
+        stats["evaluated"] += 1
+        key = decision.classification.lower()
+        if key == "rejected":
+            stats["rejected"] += 1
+        elif key in stats:
+            stats[key] += 1
+        _record_evaluation(token, decision, now)
+        histories[token.mint] = [vars(w) for w in windows[-3:]]
+        detection = alerts.setdefault(token.mint, {})
+        detection.setdefault("mint", token.mint)
+        detection.setdefault("first_detection_time", int(now))
+        detection.setdefault("first_detection_price", token.price_usd)
+        detection.setdefault("first_detection_mcap", token.market_cap)
+        if not _should_alert(token, decision, alerts, engine.config):
+            continue
+        sent_at = tg.send(format_pulse_alert(token, decision))
+        if sent_at is None:
+            continue
+        confirmed = [name for name, state in decision.source_states.items() if state == "CONFIRMED"]
+        prior = alerts.get(token.mint) or {}
+        alerts[token.mint] = {
+            "mint": token.mint, "first_detection_time": prior.get("first_detection_time") or int(now),
+            "first_detection_price": prior.get("first_detection_price") or token.price_usd,
+            "first_detection_mcap": prior.get("first_detection_mcap") or token.market_cap,
+            "first_alert_time": prior.get("first_alert_time") or int(sent_at),
+            "alert_price": token.price_usd, "alert_mcap": token.market_cap,
+            "score": decision.score, "classification": decision.classification,
+            "confirmed_sources": confirmed,
+        }
+        track_pulse_alert(token, decision, float(sent_at))
+        stats["alerted"] += 1
+        bot.log.info("ALERTED mint=%s score=%s classification=%s", token.mint, decision.score, decision.classification)
+    cutoff = now - 86400
+    histories = {mint: rows for mint, rows in histories.items() if rows and float(rows[-1].get("observed_at") or 0) >= cutoff}
+    save_json(PULSE_HISTORY_KEY, histories, ttl_seconds=86400 * 2)
+    save_json(PULSE_ALERTS_KEY, alerts, ttl_seconds=86400 * 90)
+    save_json(PULSE_PROVIDER_HEALTH_KEY, engine.health_snapshot(), ttl_seconds=86400 * 7)
+    save_last_stats(stats)
+    return stats
+
+
 def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
     if not bot.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
     if require_durable_state and not has_redis():
         raise RuntimeError("Automatic scanning requires Redis")
+    if require_durable_state and not scanner_enabled():
+        return {"disabled": 1, "discovered": 0, "evaluated": 0, "alerted": 0}
 
     chat_id = get_chat_id()
     if not chat_id:
@@ -621,9 +865,7 @@ def run_scan(*, require_durable_state: bool = True) -> dict[str, int]:
     try:
         tg = bot.Telegram(bot.TELEGRAM_BOT_TOKEN, chat_id)
         refresh_performance()
-        # Strict alert-only mode: daily performance is tracked internally but never pushed to Telegram.
-        state = load_alert_state()
-        return scan_once(tg, state)
+        return pulse_scan_once(tg)
     finally:
         release_scan_lock()
 
@@ -683,12 +925,59 @@ def ensure_qstash_schedule() -> dict[str, Any]:
     )
     r.raise_for_status()
     data = r.json()
+    actual_id = data.get("scheduleId") or schedule_id
+    save_json(QSTASH_SCHEDULE_KEY, {"schedule_id": actual_id, "destination": destination})
+    set_scanner_enabled(True)
     return {
         "configured": True,
-        "schedule_id": data.get("scheduleId") or schedule_id,
+        "schedule_id": actual_id,
         "cron": SCAN_CRON,
         "destination": destination,
     }
+
+
+def disable_qstash_schedule() -> dict[str, Any]:
+    """Disable scanning and delete every QStash schedule targeting /api/scan."""
+    if not has_redis():
+        return {"disabled": False, "reason": "Redis missing"}
+    set_scanner_enabled(False)
+    if not QSTASH_TOKEN:
+        return {"disabled": True, "schedule_deleted": False, "reason": "QSTASH_TOKEN missing"}
+    base = production_base_url()
+    destination = f"{base}/api/scan" if base else ""
+    ids: set[str] = set()
+    saved = load_json(QSTASH_SCHEDULE_KEY, {})
+    if isinstance(saved, dict) and saved.get("schedule_id"):
+        ids.add(str(saved["schedule_id"]))
+    # Verify the remote scheduler rather than trusting only the Redis flag.
+    listing = requests.get(
+        f"{QSTASH_BASE_URL}/v2/schedules",
+        headers={"Authorization": f"Bearer {QSTASH_TOKEN}"},
+        timeout=15,
+    )
+    listing.raise_for_status()
+    payload = listing.json()
+    rows = payload if isinstance(payload, list) else payload.get("schedules", []) if isinstance(payload, dict) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        target = str(row.get("destination") or row.get("url") or "")
+        if destination and target.rstrip("/") == destination.rstrip("/"):
+            value = row.get("scheduleId") or row.get("id")
+            if value:
+                ids.add(str(value))
+    deleted: list[str] = []
+    for schedule_id in ids:
+        response = requests.delete(
+            f"{QSTASH_BASE_URL}/v2/schedules/{quote(schedule_id, safe='')}",
+            headers={"Authorization": f"Bearer {QSTASH_TOKEN}"},
+            timeout=15,
+        )
+        if response.status_code not in (200, 202, 204, 404):
+            response.raise_for_status()
+        deleted.append(schedule_id)
+    save_json(QSTASH_SCHEDULE_KEY, {})
+    return {"disabled": True, "schedule_deleted": bool(deleted), "deleted_schedule_ids": deleted}
 
 
 def claim_telegram_update(update_id: Any, ttl_seconds: int = 86400) -> bool:
@@ -704,7 +993,7 @@ def claim_telegram_update(update_id: Any, ttl_seconds: int = 86400) -> bool:
 
 
 def _local_dt(ts: float | None = None):
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     tz = timezone(timedelta(hours=REPORT_TZ_OFFSET_HOURS))
     return datetime.fromtimestamp(ts or time.time(), tz=tz)
 
@@ -765,7 +1054,7 @@ def _record_multiple(rec: dict[str, Any], current_mcap: float, current_price: fl
 
 
 def refresh_performance(force: bool = False) -> dict[str, int]:
-    stats = {"tracked": 0, "checked": 0, "two_x": 0}
+    stats = {"tracked": 0, "checked": 0, "one_5x": 0, "two_x": 0, "three_x": 0, "executable_three_x": 0, "rugged": 0}
     if not has_redis():
         return stats
 
@@ -775,19 +1064,23 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
             last = float(redis_command("GET", PERFORMANCE_REFRESH_KEY) or 0)
             if now - last < PERFORMANCE_REFRESH_SECONDS:
                 data = load_performance()
-                today = ((data.get("days") or {}).get(local_day_key()) or {}).get("alerts") or {}
-                stats["tracked"] = len(today)
-                stats["two_x"] = sum(1 for r in today.values() if float(r.get("peak_multiple") or 0) >= 2)
+                all_alerts = [r for day in (data.get("days") or {}).values() for r in ((day or {}).get("alerts") or {}).values()]
+                stats["tracked"] = len(all_alerts)
+                stats["two_x"] = sum(1 for r in all_alerts if float(r.get("peak_multiple") or 0) >= 2)
                 return stats
         except Exception:
             pass
 
     data = load_performance()
-    today_bucket = ((data.get("days") or {}).get(local_day_key()) or {})
-    alerts = today_bucket.get("alerts") or {}
+    alerts: dict[str, dict[str, Any]] = {}
+    for day, bucket in (data.get("days") or {}).items():
+        for mint, rec in ((bucket or {}).get("alerts") or {}).items():
+            if now - float(rec.get("alerted_at") or now) <= 86400 * 4:
+                alerts[f"{day}:{mint}"] = rec
     stats["tracked"] = len(alerts)
 
-    for mint, rec in list(alerts.items()):
+    for composite, rec in list(alerts.items()):
+        mint = str(rec.get("mint") or composite.split(":", 1)[-1])
         try:
             probe = bot.Token(
                 mint=mint,
@@ -805,13 +1098,44 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
             rec["last_checked_at"] = int(now)
             rec["peak_mcap"] = max(float(rec.get("peak_mcap") or 0), current_mcap)
             rec["peak_price"] = max(float(rec.get("peak_price") or 0), current_price)
+            if current_price > 0:
+                prior_min = float(rec.get("min_price") or current_price)
+                rec["min_price"] = min(prior_min, current_price)
             multiple = _record_multiple(rec, current_mcap, current_price)
             rec["peak_multiple"] = max(float(rec.get("peak_multiple") or 1), multiple or 0)
+            alerted_at = float(rec.get("alerted_at") or now)
+            elapsed = now - alerted_at
+            for threshold, key in ((1.5, "time_to_1_5x"), (2.0, "time_to_2x"), (3.0, "time_to_3x")):
+                if multiple >= threshold and rec.get(key) is None:
+                    rec[key] = int(elapsed)
+            peak_price = float(rec.get("peak_price") or current_price or 0)
+            if peak_price > 0 and current_price > 0:
+                drawdown = max(0.0, (peak_price - current_price) / peak_price * 100)
+                rec["max_drawdown_pct"] = max(float(rec.get("max_drawdown_pct") or 0), drawdown)
+            entry_liq = float(rec.get("entry_liquidity") or 0)
+            if entry_liq > 0 and probe.liquidity_usd < entry_liq * .5:
+                rec["liquidity_deterioration"] = True
+            if (multiple and multiple < .1) or (entry_liq > 0 and probe.liquidity_usd < entry_liq * .2):
+                rec["rugged"] = True
+            if multiple >= 3 and bot.dex_exit_estimate(probe.liquidity_usd, 1000)[0] >= 900:
+                rec["executable_3x"] = True
+            checkpoints = rec.setdefault("checkpoints", {})
+            for hours in (1, 6, 24, 72):
+                key = f"{hours}h"
+                if elapsed >= hours * 3600 and key not in checkpoints:
+                    checkpoints[key] = {
+                        "checked_at": int(now), "price": current_price, "market_cap": current_mcap,
+                        "liquidity": probe.liquidity_usd, "multiple": multiple,
+                    }
             stats["checked"] += 1
         except Exception as exc:
             bot.log.debug("performance refresh failed for %s: %s", mint, exc)
 
+    stats["one_5x"] = sum(1 for r in alerts.values() if float(r.get("peak_multiple") or 0) >= 1.5)
     stats["two_x"] = sum(1 for r in alerts.values() if float(r.get("peak_multiple") or 0) >= 2)
+    stats["three_x"] = sum(1 for r in alerts.values() if float(r.get("peak_multiple") or 0) >= 3)
+    stats["executable_three_x"] = sum(1 for r in alerts.values() if r.get("executable_3x"))
+    stats["rugged"] = sum(1 for r in alerts.values() if r.get("rugged"))
     save_performance(data)
     try:
         redis_command("SET", PERFORMANCE_REFRESH_KEY, str(int(now)), "EX", 86400)
@@ -878,3 +1202,36 @@ def send_due_daily_reports(tg: bot.Telegram) -> int:
 def today_performance_text() -> str:
     refresh_performance(force=True)
     return format_performance_report(local_day_key(), interim=True)
+
+
+def historical_metrics() -> dict[str, Any]:
+    """Report score-bucket outcomes without presenting them as probabilities."""
+    evaluations = load_json(PULSE_EVALUATIONS_KEY, [])
+    performance = load_performance()
+    outcomes: dict[str, dict[str, Any]] = {}
+    for bucket in ("65-69", "70-74", "75-79", "80-84", "85-89", "90-94", "95+"):
+        outcomes[bucket] = {"signals": 0, "executable_2x": 0, "executable_3x": 0, "rugged": 0}
+
+    def bucket_for(score: int) -> str | None:
+        if score < 65: return None
+        if score >= 95: return "95+"
+        start = (score // 5) * 5
+        return f"{start}-{start + 4}"
+
+    by_mint: dict[str, dict[str, Any]] = {}
+    for day in (performance.get("days") or {}).values():
+        by_mint.update((day or {}).get("alerts") or {})
+    for row in evaluations if isinstance(evaluations, list) else []:
+        key = bucket_for(int(row.get("score") or 0))
+        if not key or key not in outcomes:
+            continue
+        outcomes[key]["signals"] += 1
+        rec = by_mint.get(str(row.get("mint") or "")) or {}
+        if float(rec.get("peak_multiple") or 0) >= 2 and not rec.get("liquidity_deterioration"):
+            outcomes[key]["executable_2x"] += 1
+        if rec.get("executable_3x"):
+            outcomes[key]["executable_3x"] += 1
+        if rec.get("rugged"):
+            outcomes[key]["rugged"] += 1
+    return {"label": "historical performance, not probability", "buckets": outcomes}
+
