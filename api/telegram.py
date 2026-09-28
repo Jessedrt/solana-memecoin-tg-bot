@@ -59,23 +59,39 @@ class handler(BaseHTTPRequestHandler):
         try:
             if cmd == "/start":
                 serverless.register_chat_id(chat_id)
+                tg.send("Pulse registered. Use /on, /off, /status, or /scan.", chat_id=chat_id)
 
             elif cmd == "/scan":
-                # Manual scans are silent too; only a qualifying coin may send.
-                serverless.run_scan(require_durable_state=True)
+                result = serverless.run_scan(require_durable_state=True)
+                tg.send(f"Scan complete: {result.get('evaluated', 0)} evaluated, {result.get('alerted', 0)} alerted.", chat_id=chat_id)
 
             elif cmd in ("/schedule", "/on"):
                 result = serverless.ensure_qstash_schedule()
                 if not result.get("configured"):
                     bot.log.warning("Could not enable schedule: %s", result.get("reason", "unknown"))
+                    tg.send(f"Pulse could not start: {result.get('reason', 'unknown error')}", chat_id=chat_id)
+                else:
+                    tg.send(f"Pulse scanner ON. Schedule {result.get('schedule_id')} verified.", chat_id=chat_id)
+
+            elif cmd == "/off":
+                result = serverless.disable_qstash_schedule()
+                if result.get("disabled"):
+                    tg.send("Pulse scanner OFF. Future scheduled scans are disabled.", chat_id=chat_id)
+                else:
+                    tg.send(f"Pulse could not stop: {result.get('reason', 'unknown error')}", chat_id=chat_id)
+
+            elif cmd == "/status":
+                tg.send(serverless.pulse_status_text(), chat_id=chat_id)
+
+            elif cmd == "/performance":
+                tg.send(serverless.today_performance_text(), chat_id=chat_id)
 
             else:
-                # Absolute alert-only mode: no performance/status/help/ack messages.
-                # Performance is still tracked internally in Redis.
-                bot.log.info("Ignored Telegram command in coin-alert-only mode: %s", cmd)
+                tg.send("Commands: /on /off /status /scan /performance", chat_id=chat_id)
 
             self._reply(200, {"ok": True})
         except Exception as exc:
             bot.log.exception("telegram webhook error: %s", exc)
             # Alert-only mode: operational errors stay in Vercel logs.
             self._reply(500, {"ok": False, "error": str(exc)[:300]})
+
