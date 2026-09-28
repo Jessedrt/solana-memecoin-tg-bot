@@ -792,9 +792,13 @@ def pulse_scan_once(tg: bot.Telegram) -> dict[str, int]:
     alerts = alerts if isinstance(alerts, dict) else {}
     tokens = engine.discover()
     tokens.sort(key=engine._guideline_priority, reverse=True)
+    selected = tokens[: engine.config.max_candidates]
+    # Batch DexScreener market data for the selected mints before the
+    # per-token Solana safety verification. This reduces requests and keeps
+    # multi-pool market evidence consistent within a scan.
+    engine.enrich_many(selected)
     stats = {"discovered": len(tokens), "evaluated": 0, "rejected": 0, "watch": 0, "strong_watch": 0, "high_conviction": 0, "alerted": 0}
-    for token in tokens[: engine.config.max_candidates]:
-        engine.enrich(token)
+    for token in selected:
         _legacy_due_diligence(token)
         old_rows = histories.get(token.mint) or []
         windows: list[MarketWindow] = []
