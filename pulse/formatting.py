@@ -73,10 +73,11 @@ def format_alert(t: NormalizedToken, d: CandidateDecision) -> str:
     ]
 
     lines = [
-        f"{label} <b>PULSE</b>",
+        f"{label} <b>PULSE {d.target_multiple}× CANDIDATE</b>",
         f"<b>{name}</b> ({symbol})",
         f"<b>{d.score}/100</b> · evidence {d.evidence_confidence * 100:.0f}% · {html.escape(t.discovery_lane or 'NO LANE')}",
         f"MC {usd(t.market_cap)} · LP {usd(t.liquidity_usd)} · {age} · Holders {t.holder_count if t.holder_count is not None else '?'}",
+        f"Graduated {'YES' if t.graduated is True else '?'} · Trading fees {t.total_trading_fees_sol if t.total_trading_fees_sol is not None else '?'} SOL",
         f"5m {txns} tx · B/S {buys}/{sells} · {p5}",
         f"1h {p1h} · {_momentum_icon(d.momentum)} {d.momentum}",
         (
@@ -89,6 +90,8 @@ def format_alert(t: NormalizedToken, d: CandidateDecision) -> str:
 
     if unknowns:
         lines.append("Unknown: " + ", ".join(unknowns))
+    if d.profile == "5x":
+        lines.append("Holder/insider proxy; funding clusters unverified. Jupiter quotes ≠ fills.")
 
     lines.extend([
         f"<code>{mint}</code>",

@@ -26,7 +26,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         expected = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
-        if expected and self.headers.get("X-Telegram-Bot-Api-Secret-Token", "") != expected:
+        if not expected or self.headers.get("X-Telegram-Bot-Api-Secret-Token", "") != expected:
             self._reply(403, {"ok": False, "error": "invalid webhook secret"})
             return
 
@@ -49,7 +49,8 @@ class handler(BaseHTTPRequestHandler):
             self._reply(200, {"ok": True, "ignored": True})
             return
 
-        if bot.TELEGRAM_CHAT_ID and chat_id != bot.TELEGRAM_CHAT_ID:
+        authorized_chat = bot.TELEGRAM_CHAT_ID or serverless.get_chat_id()
+        if not authorized_chat or chat_id != str(authorized_chat):
             self._reply(200, {"ok": True, "ignored": True})
             return
 
@@ -59,7 +60,18 @@ class handler(BaseHTTPRequestHandler):
         try:
             if cmd == "/start":
                 serverless.register_chat_id(chat_id)
-                tg.send("Pulse registered. Use /on, /off, /status, or /scan.", chat_id=chat_id)
+                tg.send("Pulse registered. Use /on, /off, /status, /scan, or /profile 3x|5x.", chat_id=chat_id)
+
+            elif cmd == "/profile":
+                args = text.split()[1:]
+                if not args:
+                    tg.send(f"Active profile: {serverless.scanner_profile()}. Use /profile 3x or /profile 5x.", chat_id=chat_id)
+                elif len(args) != 1 or args[0].lower() not in ("3x", "5x"):
+                    tg.send("Choose /profile 3x or /profile 5x.", chat_id=chat_id)
+                else:
+                    profile = serverless.set_scanner_profile(args[0].lower())
+                    note = " 5x requires complete holder/insider proxy data and Jupiter quotes. Funding clusters remain unverified." if profile == "5x" else ""
+                    tg.send(f"Profile {profile} selected for the next scan. Any running scan keeps its current profile.{note}", chat_id=chat_id)
 
             elif cmd == "/scan":
                 result = serverless.run_scan(require_durable_state=True)
@@ -87,7 +99,7 @@ class handler(BaseHTTPRequestHandler):
                 tg.send(serverless.today_performance_text(), chat_id=chat_id)
 
             else:
-                tg.send("Commands: /on /off /status /scan /performance", chat_id=chat_id)
+                tg.send("Commands: /on /off /status /scan /performance /profile 3x|5x", chat_id=chat_id)
 
             self._reply(200, {"ok": True})
         except Exception as exc:

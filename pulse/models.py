@@ -81,6 +81,8 @@ class NormalizedToken:
     price_change_h24: float | None = None
     bonding_progress: float | None = None
     migrated: bool | None = None
+    graduated: bool | None = None
+    total_trading_fees_sol: float | None = None
     launchpad: str | None = None
     dex_id: str | None = None
     has_socials: bool | None = None
@@ -108,6 +110,9 @@ class NormalizedToken:
     creator_failed_launches: int | None = None
     creator_dumping: bool | None = None
     rugged: bool | None = None
+    rugcheck_danger: bool | None = None
+    holder_proxy_clear: bool | None = None
+    quotes: list[Executability] = field(default_factory=list)
     pair_url: str = ""
     image_url: str = ""
     sources: dict[str, Observation] = field(default_factory=dict)
@@ -137,6 +142,8 @@ class Executability:
     proceeds: float
     impact_pct: float
     grade: str
+    source: str = "liquidity estimate"
+    observed_at: float | None = None
 
 
 @dataclass
@@ -155,6 +162,8 @@ class CandidateDecision:
     reasoning: dict[str, Any]
     source_states: dict[str, str]
     rejected_reason: str | None = None
+    profile: str = "3x"
+    target_multiple: int = 3
     raw_score: int = 0
     available_evidence_max: int = 0
     evidence_confidence: float = 0.0

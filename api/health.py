@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler
 
 import bot
@@ -21,6 +22,10 @@ class handler(BaseHTTPRequestHandler):
             "deep_dd_required": bool(bot.REQUIRE_DEEP_DD),
             "scheduler": serverless.SCAN_CRON,
             "scanner_enabled": serverless.scanner_enabled(),
+            "profile": serverless.scanner_profile(),
+            "available_profiles": ["3x", "5x"],
+            "eligibility": {"graduated_only": True, "min_market_cap_usd": 30000, "min_total_trading_fees_sol": 2},
+            "jupiter_configured": bool(os.getenv("JUPITER_API_KEY", "").strip()),
             "providers": serverless.provider_health(),
         }
         body = json.dumps(payload).encode("utf-8")

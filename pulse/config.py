@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 def _float(name: str, default: float) -> float:
@@ -20,9 +20,13 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class PulseConfig:
+    profile: str = "3x"
+    target_multiple: int = 3
+    max_liquidity: float | None = None
     min_age_minutes: float = field(default_factory=lambda: _float("PULSE_MIN_AGE_MINUTES", 5))
     max_age_minutes: float = field(default_factory=lambda: _float("PULSE_MAX_AGE_MINUTES", 360))
-    min_market_cap: float = field(default_factory=lambda: _float("PULSE_MIN_MCAP_USD", 20_000))
+    min_market_cap: float = field(default_factory=lambda: max(30_000, _float("PULSE_MIN_MCAP_USD", 30_000)))
+    min_trading_fees_sol: float = 2.0
     min_holders: int = field(default_factory=lambda: _int("PULSE_MIN_HOLDERS", 200))
     max_market_cap: float = field(default_factory=lambda: _float("PULSE_MAX_MCAP_USD", 100_000))
     preferred_liquidity: float = field(default_factory=lambda: _float("PULSE_PREFERRED_LIQUIDITY_USD", 8_000))
@@ -51,4 +55,18 @@ class PulseConfig:
         "early": _int("PULSE_WEIGHT_EARLY", 10),
         "social": _int("PULSE_WEIGHT_SOCIAL", 10),
     })
+
+    @classmethod
+    def for_profile(cls, profile: str | None = None) -> PulseConfig:
+        name = (profile or os.getenv("PULSE_PROFILE") or "3x").strip().lower()
+        if name not in ("3x", "5x"):
+            raise ValueError("Profile must be 3x or 5x")
+        config = cls()
+        if name == "3x":
+            return config
+        return replace(config, profile="5x", target_multiple=5,
+                       min_age_minutes=15, max_age_minutes=720,
+                       min_market_cap=max(30_000, config.min_market_cap), max_market_cap=min(config.max_market_cap, 100_000),
+                       critical_liquidity=8_000, preferred_liquidity=8_000,
+                       max_liquidity=80_000, max_candidates=min(config.max_candidates, 4))
 

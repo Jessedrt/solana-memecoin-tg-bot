@@ -13,8 +13,10 @@ import requests
 
 import bot
 from pulse import PulseEngine
+from pulse.config import PulseConfig
+from pulse.evaluation import eligibility_issue
 from pulse.formatting import format_alert as format_pulse_alert
-from pulse.models import MarketWindow, NormalizedToken
+from pulse.models import MarketWindow, NormalizedToken, Observation
 
 REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip() or os.getenv("KV_REST_API_URL", "").strip()
 REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip() or os.getenv("KV_REST_API_TOKEN", "").strip()
@@ -40,6 +42,8 @@ PULSE_EVALUATIONS_KEY = "pulse:evaluations"
 PULSE_ALERTS_KEY = "pulse:alerts"
 PULSE_PROVIDER_HEALTH_KEY = "pulse:provider-health"
 SCANNER_ENABLED_KEY = "pulse:scanner-enabled"
+SCANNER_PROFILE_KEY = "pulse:scanner-profile"
+FREE_CANDIDATES_KEY = "pulse:5x:discovery"
 QSTASH_SCHEDULE_KEY = "pulse:qstash-schedule-id"
 PERFORMANCE_REFRESH_SECONDS = max(120, int(os.getenv("PERFORMANCE_REFRESH_SECONDS", "300")))
 REPORT_TZ_OFFSET_HOURS = int(os.getenv("REPORT_TZ_OFFSET_HOURS", "1"))
@@ -233,20 +237,42 @@ def set_scanner_enabled(enabled: bool) -> bool:
     return True
 
 
+def scanner_profile() -> str:
+    value = redis_command("GET", SCANNER_PROFILE_KEY) if has_redis() else None
+    return PulseConfig.for_profile(str(value) if value is not None else None).profile
+
+
+def set_scanner_profile(profile: str) -> str:
+    name = PulseConfig.for_profile(profile).profile
+    if not has_redis():
+        raise RuntimeError("Redis is required to persist profile selection")
+    redis_command("SET", SCANNER_PROFILE_KEY, name)
+    return name
+
+
+def profile_key(key: str, profile: str) -> str:
+    # Keep existing 3x data and cooldowns intact.
+    return key if profile == "3x" else f"{key}:{profile}"
+
+
 def provider_health() -> dict[str, Any]:
-    value = load_json(PULSE_PROVIDER_HEALTH_KEY, {})
+    value = load_json(profile_key(PULSE_PROVIDER_HEALTH_KEY, scanner_profile()), {})
     return value if isinstance(value, dict) else {}
 
 
 def pulse_status_text() -> str:
     stats = load_last_stats()
+    if scanner_profile() != "3x":
+        stats = load_json(profile_key(STATS_KEY, scanner_profile()), {})
     health = provider_health()
     perf = load_performance()
     today_alerts = (((perf.get("days") or {}).get(local_day_key()) or {}).get("alerts") or {})
     lines = [
         "🟢 PULSE ONLINE" if scanner_enabled() else "⏸ PULSE PAUSED",
         f"Scanner: {'ON' if scanner_enabled() else 'OFF'}",
-        "TODAY",
+        f"Profile: {scanner_profile()} (switch with /profile 3x or /profile 5x)",
+        "Required: graduated · MC ≥ $30K · total trading fees ≥ 2 SOL",
+        "LAST SCAN",
         f"Discovered: {stats.get('discovered', 0)}",
         f"Evaluated: {stats.get('evaluated', 0)}",
         f"Rug Rejects: {stats.get('rejected', 0)}",
@@ -264,10 +290,11 @@ def pulse_status_text() -> str:
         f"1.5×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 1.5)}",
         f"2×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 2)}",
         f"3×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 3)}",
+        f"5×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 5)}",
         f"Rugs after alert: {sum(1 for r in today_alerts.values() if r.get('rugged'))}",
         "PROVIDERS",
     ]
-    display = {"dexscreener": "DexScreener", "pumpfun": "Pump.fun", "gmgn": "GMGN", "fomo": "Fomo", "solana": "Solana RPC"}
+    display = {"dexscreener": "DexScreener", "pumpfun": "Pump.fun", "gmgn": "GMGN", "fomo": "Fomo", "solana": "Solana RPC", "rugcheck": "RugCheck", "geckoterminal": "GeckoTerminal", "jupiter": "Jupiter", "tracker_eligibility": "Graduation/fees"}
     for key, label in display.items():
         state = str((health.get(key) or {}).get("state") or "UNKNOWN")
         lines.append(f"{label}: {state}")
@@ -627,6 +654,8 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
             )
             continue
 
+        if not bot.graduated_fee_gate(token):
+            continue
         # Use sendMessage so Telegram can render the Pump/Dex web preview.
         sent_at = tg.send(bot.format_alert(token))
         if sent_at is None:
@@ -669,9 +698,39 @@ def scan_once(tg: bot.Telegram, state: dict[str, float]) -> dict[str, int]:
     return stats
 
 
-def _pulse_history() -> dict[str, list[dict[str, Any]]]:
-    value = load_json(PULSE_HISTORY_KEY, {})
+def _pulse_history(profile: str = "3x") -> dict[str, list[dict[str, Any]]]:
+    value = load_json(profile_key(PULSE_HISTORY_KEY, profile), {})
     return value if isinstance(value, dict) else {}
+
+
+def _free_stack_candidates(discovered: list[NormalizedToken], now: float, limit: int) -> list[NormalizedToken]:
+    """Retain new pools until they reach 15 minutes; rotate eligible mints."""
+    stored = load_json(FREE_CANDIDATES_KEY, {})
+    cached = stored if isinstance(stored, dict) else {}
+    for token in discovered:
+        obs = token.sources.get("geckoterminal")
+        if token.created_at is None or obs is None:
+            continue
+        previous = cached.get(token.mint) or {}
+        cached[token.mint] = {
+            "mint": token.mint, "name": token.name, "symbol": token.symbol,
+            "created_at": min(token.created_at, previous.get("created_at", token.created_at)),
+            "observed_at": obs.observed_at, "fields": obs.fields, "raw_id": obs.raw_id,
+            "checked_at": previous.get("checked_at", 0),
+        }
+    cached = {mint: row for mint, row in cached.items()
+              if isinstance(row, dict) and 0 <= now - float(row.get("created_at") or 0) <= 12 * 3600}
+    cached = dict(sorted(cached.items(), key=lambda item: item[1]["created_at"], reverse=True)[:1000])
+    eligible = [r for r in cached.values() if now - r["created_at"] >= 15 * 60]
+    eligible.sort(key=lambda row: (row.get("checked_at", 0), row["created_at"]))
+    selected = []
+    for row in eligible[:limit]:
+        token = NormalizedToken(row["mint"], name=row["name"], symbol=row["symbol"], created_at=row["created_at"])
+        token.sources["geckoterminal"] = Observation("geckoterminal", row["observed_at"], row["fields"], row["raw_id"])
+        selected.append(token)
+        row["checked_at"] = now
+    save_json(FREE_CANDIDATES_KEY, cached, ttl_seconds=13 * 3600)
+    return selected
 
 
 def _market_window(token: NormalizedToken, observed_at: float) -> MarketWindow:
@@ -692,7 +751,7 @@ def _market_window(token: NormalizedToken, observed_at: float) -> MarketWindow:
 
 
 def _legacy_due_diligence(token: NormalizedToken) -> None:
-    """Map existing verified RugCheck/Solana Tracker evidence into the new model."""
+    """Optional paid Tracker evidence for 3x; RugCheck has its own adapter."""
     legacy = bot.Token(
         mint=token.mint,
         name=token.name,
@@ -702,17 +761,6 @@ def _legacy_due_diligence(token: NormalizedToken) -> None:
         price_usd=float(token.price_usd or 0),
         liquidity_usd=float(token.liquidity_usd or 0),
     )
-    try:
-        if bot.rugcheck_full_enrich(legacy):
-            token.rugged = legacy.rugged
-            token.mint_authority_active = token.mint_authority_active if token.mint_authority_active is not None else legacy.mint_authority_active
-            token.freeze_authority_active = token.freeze_authority_active if token.freeze_authority_active is not None else legacy.freeze_authority_active
-            token.top10_pct = token.top10_pct if token.top10_pct is not None else legacy.top10_pct
-            token.largest_holder_pct = token.largest_holder_pct if token.largest_holder_pct is not None else legacy.largest_holder_pct
-            if legacy.holder_count > 0:
-                token.holder_count = legacy.holder_count
-    except Exception as exc:
-        bot.log.warning("provider_failure provider=rugcheck mint=%s error=%s", token.mint, type(exc).__name__)
     if not bot.SOLANA_TRACKER_API_KEY:
         return
     data = bot.solana_tracker_due_diligence(legacy)
@@ -724,9 +772,14 @@ def _legacy_due_diligence(token: NormalizedToken) -> None:
     token.top10_pct = max(token.top10_pct or 0, legacy.tracker_top10_pct or 0) or token.top10_pct
     token.bundled_pct = legacy.bundler_pct
     token.sniper_pct = legacy.tracker_sniper_pct
-    token.rugged = token.rugged or legacy.tracker_rugged
-    token.mint_authority_active = token.mint_authority_active or legacy.tracker_mint_authority_active
-    token.freeze_authority_active = token.freeze_authority_active or legacy.tracker_freeze_authority_active
+    # Legacy booleans default to False even when absent. Only propagate
+    # positive danger; absent data cannot certify safety.
+    if legacy.tracker_rugged:
+        token.rugged = True
+    if legacy.tracker_mint_authority_active:
+        token.mint_authority_active = True
+    if legacy.tracker_freeze_authority_active:
+        token.freeze_authority_active = True
     token.creator_prior_launches = legacy.dev_launch_count
     token.creator_failed_launches = legacy.dev_dead_count
     if legacy.tracker_rugged or legacy.dev_launches_24h >= bot.SERIAL_DEV_LAUNCHES_24H:
@@ -744,6 +797,8 @@ def _record_evaluation(token: NormalizedToken, decision: Any, now: float) -> Non
     rows = data if isinstance(data, list) else []
     rows.append({
         "timestamp": int(now), "mint": token.mint, "token": token.symbol,
+        "profile": decision.profile, "target_multiple": decision.target_multiple,
+        "graduated": token.graduated, "total_trading_fees_sol": token.total_trading_fees_sol,
         "price": token.price_usd, "market_cap": token.market_cap,
         "liquidity": token.liquidity_usd, "score": decision.score,
         "classification": decision.classification, "safety": decision.safety.status.value,
@@ -779,9 +834,15 @@ def track_pulse_alert(token: NormalizedToken, decision: Any, alerted_at: float) 
     data = load_performance()
     day = local_day_key(alerted_at)
     bucket = data.setdefault("days", {}).setdefault(day, {"reported": False, "alerts": {}})
-    rec = bucket.setdefault("alerts", {}).setdefault(token.mint, {})
+    record_key = token.mint if decision.profile == "3x" else f"{decision.profile}:{token.mint}"
+    records = bucket.setdefault("alerts", {})
+    if record_key in records:
+        return  # A re-alert must not reset the original entry and outcome.
+    rec = records.setdefault(record_key, {})
     rec.update({
         "mint": token.mint, "symbol": token.symbol, "name": token.name,
+        "profile": decision.profile, "target_multiple": decision.target_multiple,
+        "graduated": token.graduated, "total_trading_fees_sol": token.total_trading_fees_sol,
         "alerted_at": int(alerted_at), "entry_mcap": float(token.market_cap or 0),
         "entry_price": float(token.price_usd or 0), "entry_liquidity": float(token.liquidity_usd or 0),
         "peak_mcap": float(token.market_cap or 0), "peak_price": float(token.price_usd or 0),
@@ -791,28 +852,31 @@ def track_pulse_alert(token: NormalizedToken, decision: Any, alerted_at: float) 
         "wallet_metrics": {"demand_quality": decision.demand_quality},
         "momentum_metrics": {"momentum": decision.momentum},
         "checkpoints": {}, "time_to_1_5x": None, "time_to_2x": None,
-        "time_to_3x": None, "executable_3x": False, "rugged": False,
+        "time_to_3x": None, "time_to_5x": None, "executable_3x": False, "rugged": False,
         "liquidity_deterioration": False,
     })
     save_performance(data)
 
 
 def pulse_scan_once(tg: bot.Telegram) -> dict[str, int]:
-    engine = PulseEngine()
+    profile = scanner_profile()
+    engine = PulseEngine(PulseConfig.for_profile(profile))
     now = time.time()
-    histories = _pulse_history()
-    alerts = load_json(PULSE_ALERTS_KEY, {})
+    histories = _pulse_history(profile)
+    alerts = load_json(profile_key(PULSE_ALERTS_KEY, profile), {})
     alerts = alerts if isinstance(alerts, dict) else {}
     tokens = engine.discover()
     tokens.sort(key=engine._guideline_priority, reverse=True)
-    selected = tokens[: engine.config.max_candidates]
+    selected = (_free_stack_candidates(tokens, now, engine.config.max_candidates)
+                if profile == "5x" else tokens[: engine.config.max_candidates])
     # Batch DexScreener market data for the selected mints before the
     # per-token Solana safety verification. This reduces requests and keeps
     # multi-pool market evidence consistent within a scan.
     engine.enrich_many(selected)
     stats = {"discovered": len(tokens), "evaluated": 0, "rejected": 0, "watch": 0, "strong_watch": 0, "high_conviction": 0, "no_alert": 0, "highest_score": 0, "new_token": 0, "about_to_graduate": 0, "migrated": 0, "no_lane": 0, "alerted": 0}
     for token in selected:
-        _legacy_due_diligence(token)
+        if profile == "3x" and not eligibility_issue(token, engine.config):
+            _legacy_due_diligence(token)
         old_rows = histories.get(token.mint) or []
         windows: list[MarketWindow] = []
         for row in old_rows[-2:]:
@@ -861,10 +925,12 @@ def pulse_scan_once(tg: bot.Telegram) -> dict[str, int]:
         bot.log.info("ALERTED mint=%s score=%s classification=%s", token.mint, decision.score, decision.classification)
     cutoff = now - 86400
     histories = {mint: rows for mint, rows in histories.items() if rows and float(rows[-1].get("observed_at") or 0) >= cutoff}
-    save_json(PULSE_HISTORY_KEY, histories, ttl_seconds=86400 * 2)
-    save_json(PULSE_ALERTS_KEY, alerts, ttl_seconds=86400 * 90)
-    save_json(PULSE_PROVIDER_HEALTH_KEY, engine.health_snapshot(), ttl_seconds=86400 * 7)
-    save_last_stats(stats)
+    save_json(profile_key(PULSE_HISTORY_KEY, profile), histories, ttl_seconds=86400 * 2)
+    save_json(profile_key(PULSE_ALERTS_KEY, profile), alerts, ttl_seconds=86400 * 90)
+    save_json(profile_key(PULSE_PROVIDER_HEALTH_KEY, profile), engine.health_snapshot(), ttl_seconds=86400 * 7)
+    save_json(profile_key(STATS_KEY, profile), stats)
+    if profile == "3x":
+        save_last_stats(stats)
     return stats
 
 
@@ -1126,7 +1192,7 @@ def refresh_performance(force: bool = False) -> dict[str, int]:
             rec["peak_multiple"] = max(float(rec.get("peak_multiple") or 1), multiple or 0)
             alerted_at = float(rec.get("alerted_at") or now)
             elapsed = now - alerted_at
-            for threshold, key in ((1.5, "time_to_1_5x"), (2.0, "time_to_2x"), (3.0, "time_to_3x")):
+            for threshold, key in ((1.5, "time_to_1_5x"), (2.0, "time_to_2x"), (3.0, "time_to_3x"), (5.0, "time_to_5x")):
                 if multiple >= threshold and rec.get(key) is None:
                     rec[key] = int(elapsed)
             peak_price = float(rec.get("peak_price") or current_price or 0)
@@ -1175,8 +1241,11 @@ def format_performance_report(day: str, *, interim: bool = False) -> str:
     title = "📈 PULSE Performance — today" if interim else f"🏁 PULSE Daily Results — {day}"
     lines = [
         title,
-        f"Alerts tracked: <b>{len(alerts)}</b>",
+        f"Alerts tracked (both profiles): <b>{len(alerts)}</b>",
         f"Reached 2x+: <b>{len(winners)}</b>",
+        f"Reached 3x+: <b>{sum(float(r.get('peak_multiple') or 0) >= 3 for r in alerts)}</b>",
+        f"Reached 5x+: <b>{sum(float(r.get('peak_multiple') or 0) >= 5 for r in alerts)}</b>",
+        "Observed price peaks, not executed returns.",
     ]
     if not winners:
         lines.append("No tracked alert reached 2x yet." if interim else "No tracked alert reached 2x during the day.")
@@ -1194,7 +1263,7 @@ def format_performance_report(day: str, *, interim: bool = False) -> str:
         else:
             move = "price-tracked"
         lines.append(
-            f"{i}. <b>{symbol}</b> — <b>{mult:.2f}x</b> peak · {move}\n"
+            f"{i}. <b>{symbol}</b> [{rec.get('profile', '3x')}] — <b>{mult:.2f}x</b> peak · {move}\n"
             f'<a href="https://dexscreener.com/solana/{mint}">DexScreener</a>'
         )
     return "\n".join(lines)
@@ -1247,7 +1316,10 @@ def historical_metrics() -> dict[str, Any]:
         if not key or key not in outcomes:
             continue
         outcomes[key]["signals"] += 1
-        rec = by_mint.get(str(row.get("mint") or "")) or {}
+        record_key = str(row.get("mint") or "")
+        if row.get("profile", "3x") != "3x":
+            record_key = f"{row['profile']}:{record_key}"
+        rec = by_mint.get(record_key) or {}
         if float(rec.get("peak_multiple") or 0) >= 2 and not rec.get("liquidity_deterioration"):
             outcomes[key]["executable_2x"] += 1
         if rec.get("executable_3x"):

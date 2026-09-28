@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -24,6 +25,8 @@ def _check(value: Any, fail: bool, warn: bool = False) -> SafetyStatus:
 
 def hard_rug_gate(t: NormalizedToken, cfg: PulseConfig) -> SafetyReport:
     checks = {
+        "graduated": _check(t.graduated, t.graduated is False),
+        "trading_fees": _check(t.total_trading_fees_sol, (t.total_trading_fees_sol or 0) < cfg.min_trading_fees_sol),
         "mint_authority": _check(t.mint_authority_active, t.mint_authority_active is True),
         "freeze_authority": _check(t.freeze_authority_active, t.freeze_authority_active is True),
         "rugged": _check(t.rugged, t.rugged is True),
@@ -39,11 +42,53 @@ def hard_rug_gate(t: NormalizedToken, cfg: PulseConfig) -> SafetyReport:
         "creator_history": SafetyStatus.FAIL if t.creator_risk == "CRITICAL" else SafetyStatus.WARN if t.creator_risk == "HIGH" else SafetyStatus.PASS if t.creator_risk in ("LOW", "MEDIUM") else SafetyStatus.UNKNOWN,
         "liquidity": _check(t.liquidity_usd, (t.liquidity_usd or 0) < cfg.critical_liquidity, (t.liquidity_usd or 0) < cfg.preferred_liquidity),
     }
+    if t.rugcheck_danger is not None or cfg.profile == "5x":
+        checks["rugcheck_danger"] = _check(t.rugcheck_danger, t.rugcheck_danger is True)
+    if cfg.profile == "5x":
+        checks["holder_proxy"] = _check(t.holder_proxy_clear, t.holder_proxy_clear is False)
     failures = [name for name, result in checks.items() if result == SafetyStatus.FAIL]
     warnings = [name for name, result in checks.items() if result == SafetyStatus.WARN]
     unknowns = [name for name, result in checks.items() if result == SafetyStatus.UNKNOWN]
     status = SafetyStatus.FAIL if failures else SafetyStatus.UNKNOWN if len(unknowns) >= 4 else SafetyStatus.WARN if warnings or unknowns else SafetyStatus.PASS
     return SafetyReport(status, checks, failures, warnings, unknowns)
+
+
+def eligibility_issue(t: NormalizedToken, cfg: PulseConfig) -> str | None:
+    """Universal non-negotiable requirements, checked again before alerting."""
+    if t.market_cap is None or not math.isfinite(t.market_cap) or t.market_cap < max(30_000, cfg.min_market_cap):
+        return "market cap unknown or below $30,000 minimum"
+    dex = t.sources.get("dexscreener")
+    if not dex or dex.fields.get("market_cap") != t.market_cap or not 0 <= time.time() - dex.observed_at <= cfg.stale_seconds:
+        return "fresh DexScreener market cap unavailable"
+    if t.graduated is not True:
+        return "graduation unconfirmed or token not graduated"
+    fees = t.total_trading_fees_sol
+    if fees is None or not math.isfinite(fees) or fees < max(2.0, cfg.min_trading_fees_sol):
+        return "total trading fees unknown or below 2 SOL"
+    evidence = t.sources.get("tracker_eligibility")
+    if (not evidence or not 0 <= time.time() - evidence.observed_at <= cfg.stale_seconds
+            or evidence.fields.get("status") != "graduated"
+            or evidence.fields.get("total_trading_fees_sol") != fees):
+        return "graduation/fee evidence missing, stale or inconsistent"
+    return None
+
+
+def profile_range_issue(t: NormalizedToken, cfg: PulseConfig) -> str | None:
+    if cfg.profile != "5x":
+        return None
+    for label, value, low, high in (
+        ("market cap", t.market_cap, cfg.min_market_cap, cfg.max_market_cap),
+        ("liquidity", t.liquidity_usd, cfg.critical_liquidity, cfg.max_liquidity),
+        ("age", t.age_minutes, cfg.min_age_minutes, cfg.max_age_minutes),
+    ):
+        if value is None or not math.isfinite(value):
+            return f"unknown {label}"
+        if value < low or (high is not None and value > high):
+            return f"{label} outside 5x range"
+    dex = t.sources.get("dexscreener")
+    if not dex or any(dex.fields.get(key) is None for key in ("market_cap", "liquidity_usd")):
+        return "missing DexScreener market evidence"
+    return None
 
 
 def _series(t: NormalizedToken, attr: str) -> list[float]:
@@ -256,7 +301,8 @@ def _component_scores(
 
 def source_states(t: NormalizedToken, cfg: PulseConfig) -> dict[str, str]:
     now = time.time()
-    states = {name: "UNAVAILABLE" for name in ("pumpfun", "gmgn", "dexscreener", "fomo", "solana")}
+    names = ("geckoterminal", "dexscreener", "rugcheck", "solana", "jupiter", "tracker_eligibility") if cfg.profile == "5x" else ("pumpfun", "gmgn", "dexscreener", "fomo", "solana", "rugcheck", "tracker_eligibility")
+    states = {name: "UNAVAILABLE" for name in names}
     for name, obs in t.sources.items():
         states[name] = "STALE" if now - obs.observed_at > cfg.stale_seconds else "CONFIRMED"
     for conflict in t.conflicts:
@@ -295,8 +341,7 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
     else:
         momentum = "UNKNOWN"
     liquidity_trend = trend(_series(t, "liquidity"), .05)
-
-    rejected = None
+    rejected = eligibility_issue(t, cfg)
     if safety.status == SafetyStatus.FAIL:
         score, rejected = 0, "critical safety failure: " + ", ".join(safety.failures)
     elif quality == "MANIPULATED":
@@ -316,6 +361,23 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
         score = min(score, 74)
     if t.conflicts:
         score = min(score, 74)
+    states = source_states(t, cfg)
+    if cfg.profile == "5x" and not rejected:
+        rejected = profile_range_issue(t, cfg)
+        mandatory = ("mint_authority", "freeze_authority", "rugcheck_danger", "holder_proxy", "top10_concentration")
+        if not rejected and any(safety.checks.get(k) != SafetyStatus.PASS for k in mandatory):
+            rejected = "5x safety evidence incomplete or not PASS"
+        if not rejected and ("geckoterminal" not in t.sources or any(states.get(k) != "CONFIRMED" for k in ("dexscreener", "rugcheck", "solana"))):
+            rejected = "5x required source unavailable, stale or conflicting"
+        quotes_ok = (len(t.quotes) == 3 and {q.amount for q in t.quotes} == {100, 500, 1000}
+                     and all(q.grade in ("GOOD", "ACCEPTABLE") and q.observed_at is not None
+                             and 0 <= time.time() - q.observed_at <= 60 for q in t.quotes))
+        if not rejected and not quotes_ok:
+            rejected = "fresh two-way Jupiter quotes unavailable or excessive impact"
+        if rejected:
+            score = 0
+    if rejected:
+        score = 0
 
     evidence_pct = evidence_confidence * 100
     hard_max_market_cap = min(cfg.max_market_cap, 100_000)
@@ -355,11 +417,12 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
         demand_quality=quality,
         momentum=momentum,
         liquidity_trend=liquidity_trend,
-        executability=exit_analysis(t.liquidity_usd),
-        target_market_cap=(t.market_cap * 3 if t.market_cap else None),
+        executability=t.quotes or exit_analysis(t.liquidity_usd),
+        target_market_cap=(t.market_cap * cfg.target_multiple if t.market_cap else None),
         reasoning={},
         source_states=source_states(t, cfg),
         rejected_reason=rejected,
+        profile=cfg.profile, target_multiple=cfg.target_multiple,
         raw_score=raw_score,
         available_evidence_max=available_max,
         evidence_confidence=round(evidence_confidence, 3),

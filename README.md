@@ -22,7 +22,10 @@ This is a research/alerting bot, not an auto-buyer. A candidate score is a ranki
 | Pump.fun | Best-effort new-launch discovery and bonding metadata via its frontend feed | `LIMITED`; Pump.fun does not publish a stable public API guarantee for this feed |
 | DexScreener | Secondary token-profile discovery and market/pair enrichment | `ONLINE` only after a successful response |
 | Solana RPC | Authoritative mint/freeze authority, supply, and largest-account concentration | `ONLINE` only after a successful RPC response |
-| Solana Tracker | Optional creator/bundle/sniper/holder due diligence using the existing keyed integration | Used only when `SOLANA_TRACKER_API_KEY` is set |
+| Solana Tracker | Required exact-mint graduation and cumulative trading-fee evidence; optional deeper due diligence | Missing key/data blocks both profiles |
+| GeckoTerminal | New-pool discovery for 5x; bounded Redis retention until pools reach minimum age | Discovery does not certify graduation |
+| RugCheck | Danger risks, total holders and holder/insider concentration proxy | Unknown fields remain unknown |
+| Jupiter | 5x quote-only USDC → token → USDC checks at $100/$500/$1,000 | Missing key/route or stale quotes block 5x |
 | GMGN | Adapter exists; no supported public API is configured | `UNAVAILABLE`; no synthetic data |
 | Fomo | Adapter exists; no supported public API is configured | `UNAVAILABLE`; no synthetic data |
 
@@ -40,24 +43,83 @@ Copy `.env.example`. Required for Vercel operation:
 
 ```text
 TELEGRAM_BOT_TOKEN          Telegram bot authentication
+TELEGRAM_CHAT_ID            authorized destination (or previously registered Redis chat)
 TELEGRAM_WEBHOOK_SECRET     verifies Telegram webhook deliveries
 SCANNER_SECRET              protects /api/scan
 SETUP_SECRET                protects /api/setup
 UPSTASH_REDIS_REST_URL      durable state
 UPSTASH_REDIS_REST_TOKEN    durable state authentication
 QSTASH_TOKEN                recurring schedule control
+SOLANA_TRACKER_API_KEY      graduation and fees.totalTrading verification
 ```
 
 Optional:
 
 ```text
-TELEGRAM_CHAT_ID            fixed destination; otherwise /start registers one
 PUBLIC_BASE_URL             explicit production URL
 SOLANA_RPC_URL              Solana RPC; defaults to public mainnet-beta
-SOLANA_TRACKER_API_KEY      deeper creator/bundle/sniper evidence
+JUPITER_API_KEY             required when selecting the 5x profile
 ```
 
 Every `PULSE_*` threshold and weight is documented in `.env.example`.
+
+## Graduated-only profiles
+
+Both profiles are retained. `/profile` reports the active profile; `/profile 3x`
+and `/profile 5x` persist the selection in Redis for subsequent scans. The
+default remains 3x. Changing profile does not start a scan, reset alert history,
+or alter an in-progress scan. Historical 3x keys are preserved; 5x gets separate
+history, alert deduplication, provider health, and performance-entry keys.
+
+Mandatory for **both** profiles:
+
+- Confirmed `status = graduated`; `graduating`, unknown, a Pump `complete`
+  flag, or merely appearing on a DEX is insufficient.
+- Fresh DexScreener market cap of at least **$30,000**, with the existing
+  **$100,000 absolute alert ceiling** and **200-holder minimum** preserved.
+- At least **2 SOL of cumulative trading fees**, using only Solana Tracker's
+  `fees.totalTrading`. This is not `fees.total`, priority tips, creator fees,
+  or an estimate from volume. Exactly 2 SOL qualifies. Missing/stale/ambiguous
+  exact-mint evidence blocks alerts.
+- Existing safety, evidence-coverage, anti-chase and momentum gates still apply.
+
+The 5x profile additionally requires liquidity $8K–$80K, observed age 15m–12h,
+RugCheck without a Danger risk, verified revoked mint/freeze authority, a
+passing observed holder/insider proxy, and fresh two-way Jupiter routes for
+all three order sizes. The existing $100K ceiling takes precedence over the
+earlier proposed $250K ceiling. Age is earliest observed pool age where a
+true token-creation timestamp is unavailable, not time since graduation.
+
+The holder proxy requires ten observed holders with owner and insider fields,
+top-ten concentration ≤60%, largest observed owner ≤30%, and observed insider
+holdings ≤35%. It does **not** establish independent funding relationships;
+the alert labels that limitation. Unidentified custody/LP accounts are not
+silently excluded. Conservative false negatives are possible.
+
+5x discovery uses one GeckoTerminal new-pools page per scan and retains up to
+1,000 candidates for at most 12 hours. Up to four eligible-age candidates are
+rotated per scan. Coverage is bounded, not exhaustive. Quotes are obtained
+only after range and safety checks. Jupiter v2 `/order` is called without a
+taker: no wallet connection, signing, private key, or trade execution occurs.
+Quotes use USDC assuming $1, 1% slippage per leg, and reject >8% impact/round-trip
+loss. Network fees are excluded; quotes do not prove a future fill or rule out
+all token restrictions. 3x retains its labeled liquidity estimate.
+
+The minimum-fee requirement means the stack is no longer fully keyless:
+`SOLANA_TRACKER_API_KEY` is required for both profiles; `JUPITER_API_KEY` is also
+required for 5x. Provider plan quotas apply. GMGN remains unavailable/optional;
+GoPlus is not used as an EVM honeypot substitute for Solana checks.
+Set keys server-side in the appropriate Vercel environment, never in this
+repository. Use isolated preview Redis/Telegram credentials for mutation tests.
+
+New/about-to-graduate alert lanes are intentionally disabled by the graduated-only
+rule. The webhook requires its secret and a configured or previously registered
+authorized chat; unknown chats cannot claim ownership through `/start`.
+
+API contracts: [Tracker search](https://docs.solanatracker.io/data-api/search/token-search),
+[Jupiter quote-only order](https://developers.jup.ag/docs/api-reference/swap/order),
+[GeckoTerminal](https://apiguide.geckoterminal.com/),
+[RugCheck](https://api.rugcheck.xyz/swagger/index.html).
 
 ## Deploy and operate
 

@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import requests
 
 from pulse.config import PulseConfig
-from pulse.engine import PulseEngine
 from pulse.discovery import assign_discovery_lane
+from pulse.engine import PulseEngine
 from pulse.evaluation import (
     demand_quality,
     evaluate,
@@ -28,6 +28,7 @@ def safe_token() -> NormalizedToken:
     now = time.time()
     return NormalizedToken(
         mint=MINT, name="Pulse Test", symbol="PULSE", created_at=now - 20 * 60,
+        graduated=True, total_trading_fees_sol=2.0,
         price_usd=.0001, market_cap=75_000, liquidity_usd=28_000,
         volume_m5=17_000, volume_h1=20_000, buys_m5=127, sells_m5=40, txns_m5=167,
         price_change_m5=15, price_change_h1=35, social_score=80,
@@ -41,6 +42,7 @@ def safe_token() -> NormalizedToken:
             "pumpfun": Observation("pumpfun", now, {"market_cap": 75_000}),
             "dexscreener": Observation("dexscreener", now, {"market_cap": 75_000}),
             "solana": Observation("solana", now, {"top10_pct": 30}),
+            "tracker_eligibility": Observation("tracker_eligibility", now, {"status": "graduated", "total_trading_fees_sol": 2.0}),
         },
         history=[
             MarketWindow(now - 600, 29, 8, 2400, 500, 50, 14_000, 50, .00008, 60_000),
@@ -138,6 +140,7 @@ class EvaluationTests(unittest.TestCase):
     def test_alert_requires_market_cap_inside_configured_range(self):
         token = safe_token()
         token.market_cap = self.cfg.max_market_cap + 1
+        token.sources["dexscreener"].fields["market_cap"] = token.market_cap
         decision = evaluate(token, self.cfg)
         self.assertFalse(decision.alert)
         self.assertEqual(decision.classification, "NO_ALERT")
@@ -165,6 +168,7 @@ class EvaluationTests(unittest.TestCase):
     def test_absolute_100k_alert_cap_cannot_be_overridden_higher(self):
         token = safe_token()
         token.market_cap = 100_001
+        token.sources["dexscreener"].fields["market_cap"] = token.market_cap
         cfg = PulseConfig(max_market_cap=500_000)
         decision = evaluate(token, cfg)
         self.assertFalse(decision.alert)
@@ -248,42 +252,47 @@ class EvaluationTests(unittest.TestCase):
 
 
 class DiscoveryLaneTests(unittest.TestCase):
-    def test_new_token_preset(self):
+    def test_confirmed_graduate_lane(self):
         token = safe_token()
-        self.assertEqual(assign_discovery_lane(token), "NEW_TOKEN")
+        self.assertEqual(assign_discovery_lane(token), "MIGRATED")
 
     def test_new_token_requires_socials(self):
         token = safe_token()
+        token.graduated = False
         token.has_socials = False
         self.assertIsNone(assign_discovery_lane(token))
 
     def test_new_token_rejects_dev_over_three_percent(self):
         token = safe_token()
+        token.graduated = False
         token.creator_pct = 3.1
         self.assertIsNone(assign_discovery_lane(token))
 
     def test_new_token_rejects_snipers_over_five_percent(self):
         token = safe_token()
+        token.graduated = False
         token.sniper_pct = 5.1
         self.assertIsNone(assign_discovery_lane(token))
 
     def test_about_to_graduate_preset(self):
         token = safe_token()
+        token.graduated = False
         token.market_cap = 25_000
         token.holder_count = 200
         token.sniper_pct = 10
         token.has_socials = False
         token.volume_h1 = 16_000
-        self.assertEqual(assign_discovery_lane(token), "ABOUT_TO_GRADUATE")
+        self.assertIsNone(assign_discovery_lane(token))
 
-    def test_about_to_graduate_allows_no_socials(self):
+    def test_about_to_graduate_never_allowed_without_socials(self):
         token = safe_token()
+        token.graduated = False
         token.market_cap = 25_000
         token.holder_count = 200
         token.sniper_pct = 10
         token.has_socials = False
         token.volume_h1 = 16_000
-        self.assertEqual(assign_discovery_lane(token), "ABOUT_TO_GRADUATE")
+        self.assertIsNone(assign_discovery_lane(token))
 
     def test_migrated_preset(self):
         token = safe_token()
@@ -293,12 +302,13 @@ class DiscoveryLaneTests(unittest.TestCase):
 
     def test_token_without_a_lane_cannot_alert(self):
         token = safe_token()
+        token.graduated = False
         token.has_socials = False
         token.migrated = False
         token.market_cap = 75_000
         decision = evaluate(token, PulseConfig())
         self.assertFalse(decision.alert)
-        self.assertEqual(decision.classification, "NO_ALERT")
+        self.assertEqual(decision.classification, "REJECTED")
 
 
 class DexScreenerProviderTests(unittest.TestCase):
