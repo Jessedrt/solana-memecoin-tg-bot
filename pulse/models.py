@@ -150,6 +150,9 @@ class CandidateDecision:
     reasoning: dict[str, Any]
     source_states: dict[str, str]
     rejected_reason: str | None = None
+    raw_score: int = 0
+    available_evidence_max: int = 0
+    evidence_confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
