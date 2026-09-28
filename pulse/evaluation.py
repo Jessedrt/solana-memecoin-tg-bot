@@ -317,6 +317,7 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
 
     evidence_pct = evidence_confidence * 100
     hard_max_market_cap = min(cfg.max_market_cap, 100_000)\n    market_cap_ok = t.market_cap is not None and cfg.min_market_cap <= t.market_cap <= hard_max_market_cap
+    holders_ok = t.holder_count is not None and t.holder_count >= cfg.min_holders
     age_ok = t.age_minutes is not None and cfg.min_age_minutes <= t.age_minutes <= cfg.max_age_minutes
     move_ok = (
         (t.price_change_m5 is None or t.price_change_m5 <= cfg.max_alert_price_change_m5)
@@ -327,6 +328,7 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
         and score >= cfg.alert_min_score
         and evidence_pct >= cfg.min_alert_evidence_pct
         and market_cap_ok
+        and holders_ok
         and age_ok
         and move_ok
         and momentum != "DECLINING"

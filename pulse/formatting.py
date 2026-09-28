@@ -76,7 +76,7 @@ def format_alert(t: NormalizedToken, d: CandidateDecision) -> str:
         f"{label} <b>PULSE</b>",
         f"<b>{name}</b> ({symbol})",
         f"<b>{d.score}/100</b> · evidence {d.evidence_confidence * 100:.0f}%",
-        f"MC {usd(t.market_cap)} · LP {usd(t.liquidity_usd)} · {age}",
+        f"MC {usd(t.market_cap)} · LP {usd(t.liquidity_usd)} · {age} · Holders {t.holder_count if t.holder_count is not None else '?'}",
         f"5m {txns} tx · B/S {buys}/{sells} · {p5}",
         f"1h {p1h} · {_momentum_icon(d.momentum)} {d.momentum}",
         (

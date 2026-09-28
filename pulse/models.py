@@ -94,6 +94,7 @@ class NormalizedToken:
     related_wallet_pct: float | None = None
     sniper_pct: float | None = None
     bundled_pct: float | None = None
+    holder_count: int | None = None
     independent_holders: int | None = None
     fresh_wallet_pct: float | None = None
     wallet_cluster_score: float | None = None

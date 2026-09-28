@@ -680,6 +680,7 @@ def _market_window(token: NormalizedToken, observed_at: float) -> MarketWindow:
         sell_volume=None,
         transactions=token.txns_m5,
         liquidity=token.liquidity_usd,
+        holder_count=token.holder_count,
         price=token.price_usd,
         market_cap=token.market_cap,
     )
@@ -703,6 +704,8 @@ def _legacy_due_diligence(token: NormalizedToken) -> None:
             token.freeze_authority_active = token.freeze_authority_active if token.freeze_authority_active is not None else legacy.freeze_authority_active
             token.top10_pct = token.top10_pct if token.top10_pct is not None else legacy.top10_pct
             token.largest_holder_pct = token.largest_holder_pct if token.largest_holder_pct is not None else legacy.largest_holder_pct
+            if legacy.holder_count > 0:
+                token.holder_count = legacy.holder_count
     except Exception as exc:
         bot.log.warning("provider_failure provider=rugcheck mint=%s error=%s", token.mint, type(exc).__name__)
     if not bot.SOLANA_TRACKER_API_KEY:

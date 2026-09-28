@@ -32,7 +32,7 @@ def safe_token() -> NormalizedToken:
         price_change_m5=15, price_change_h1=35, social_score=80,
         mint_authority_active=False, freeze_authority_active=False, rugged=False,
         top10_pct=30, top20_pct=42, largest_holder_pct=8, creator_pct=2,
-        related_wallet_pct=5, sniper_pct=3, bundled_pct=2,
+        related_wallet_pct=5, sniper_pct=3, bundled_pct=2, holder_count=500,
         wallet_cluster_score=.1, wash_trading_score=.1, creator_dumping=False,
         creator_risk="LOW", pair_url="https://dexscreener.com/solana/test",
         sources={
@@ -140,6 +140,26 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse(decision.alert)
         self.assertEqual(decision.classification, "NO_ALERT")
 
+    def test_alert_requires_at_least_200_holders(self):
+        token = safe_token()
+        token.holder_count = 199
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_unknown_holder_count_cannot_alert(self):
+        token = safe_token()
+        token.holder_count = None
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_200_holders_meets_holder_gate(self):
+        token = safe_token()
+        token.holder_count = 200
+        decision = evaluate(token, self.cfg)
+        self.assertTrue(decision.alert)
+
     def test_absolute_100k_alert_cap_cannot_be_overridden_higher(self):
         token = safe_token()
         token.market_cap = 100_001
@@ -219,6 +239,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("Chart", alert)
         self.assertIn("GMGN", alert)
         self.assertIn("Solscan", alert)
+        self.assertIn("Holders 500", alert)
         self.assertLess(len(alert.splitlines()), 15)
         self.assertNotIn("% chance", alert)
         self.assertNotIn("{\"", alert)
