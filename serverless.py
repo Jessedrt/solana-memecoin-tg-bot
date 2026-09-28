@@ -253,6 +253,8 @@ def pulse_status_text() -> str:
         f"Watch: {stats.get('watch', 0)}",
         f"Strong Watch: {stats.get('strong_watch', 0)}",
         f"High Conviction: {stats.get('high_conviction', 0)}",
+        f"No Alert: {stats.get('no_alert', 0)}",
+        f"Highest Score: {stats.get('highest_score', 0)}/100",
         "ALERT RESULTS",
         f"1.5×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 1.5)}",
         f"2×: {sum(1 for r in today_alerts.values() if float(r.get('peak_multiple') or 0) >= 2)}",
@@ -739,6 +741,9 @@ def _record_evaluation(token: NormalizedToken, decision: Any, now: float) -> Non
         "classification": decision.classification, "safety": decision.safety.status.value,
         "components": decision.components, "demand_quality": decision.demand_quality,
         "momentum": decision.momentum, "source_states": decision.source_states,
+        "raw_score": decision.raw_score,
+        "available_evidence_max": decision.available_evidence_max,
+        "evidence_confidence": decision.evidence_confidence,
         "rejected_reason": decision.rejected_reason,
     })
     cutoff = now - 86400 * 45
@@ -797,7 +802,7 @@ def pulse_scan_once(tg: bot.Telegram) -> dict[str, int]:
     # per-token Solana safety verification. This reduces requests and keeps
     # multi-pool market evidence consistent within a scan.
     engine.enrich_many(selected)
-    stats = {"discovered": len(tokens), "evaluated": 0, "rejected": 0, "watch": 0, "strong_watch": 0, "high_conviction": 0, "alerted": 0}
+    stats = {"discovered": len(tokens), "evaluated": 0, "rejected": 0, "watch": 0, "strong_watch": 0, "high_conviction": 0, "no_alert": 0, "highest_score": 0, "alerted": 0}
     for token in selected:
         _legacy_due_diligence(token)
         old_rows = histories.get(token.mint) or []
@@ -811,6 +816,7 @@ def pulse_scan_once(tg: bot.Telegram) -> dict[str, int]:
         windows.append(current)
         decision = engine.evaluate(token, windows)
         stats["evaluated"] += 1
+        stats["highest_score"] = max(stats["highest_score"], decision.score)
         key = decision.classification.lower()
         if key == "rejected":
             stats["rejected"] += 1
