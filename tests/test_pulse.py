@@ -140,6 +140,14 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse(decision.alert)
         self.assertEqual(decision.classification, "NO_ALERT")
 
+    def test_absolute_100k_alert_cap_cannot_be_overridden_higher(self):
+        token = safe_token()
+        token.market_cap = 100_001
+        cfg = PulseConfig(max_market_cap=500_000)
+        decision = evaluate(token, cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
     def test_declining_momentum_cannot_alert(self):
         token = safe_token()
         now = time.time()
