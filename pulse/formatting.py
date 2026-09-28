@@ -20,7 +20,7 @@ def _icon(state: str) -> str:
 
 
 def format_alert(t: NormalizedToken, d: CandidateDecision) -> str:
-    label = "🔥 HIGH CONVICTION" if d.classification == "HIGH_CONVICTION" else "🟢 STRONG WATCH"
+    label = {"HIGH_CONVICTION": "🔥 HIGH CONVICTION", "STRONG_WATCH": "🟢 STRONG WATCH", "WATCH": "🟡 WATCH"}.get(d.classification, "🟡 WATCH")
     age = f"{t.age_minutes:.0f}m" if t.age_minutes is not None else "UNKNOWN"
     buyers = [w.unique_buyers for w in t.history if w.unique_buyers is not None]
     buy_vol = [usd(w.buy_volume) for w in t.history if w.buy_volume is not None]
@@ -36,9 +36,11 @@ def format_alert(t: NormalizedToken, d: CandidateDecision) -> str:
         f"Approx. 3× MC: {usd(d.target_market_cap)}",
         "━━━━━━━━━━━━━━━━",
         f"<b>3× CANDIDATE SCORE {d.score}/100</b>", label,
+        f"Evidence coverage: {d.evidence_confidence * 100:.0f}% · raw {d.raw_score}/{d.available_evidence_max}",
         "━━━━━━━━━━━━━━━━", "<b>MOMENTUM</b>",
         "Unique Buyers: " + (" → ".join(map(str, buyers)) if buyers else "UNKNOWN"),
         "Buy Volume: " + (" → ".join(buy_vol) if buy_vol else "UNKNOWN"),
+        f"5m Transactions: {t.txns_m5 if t.txns_m5 is not None else 'UNKNOWN'} · Buys/Sells: {t.buys_m5 if t.buys_m5 is not None else '?'} / {t.sells_m5 if t.sells_m5 is not None else '?'}",
         f"Momentum: {d.momentum} · Demand: {d.demand_quality}",
         "━━━━━━━━━━━━━━━━", "<b>SAFETY</b>",
         f"Mint Authority: {checks['mint_authority'].value}",
