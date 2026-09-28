@@ -75,17 +75,7 @@ class PulseEngine:
         score += min(5, len(t.sources))
         return score
 
-    def enrich(self, token: NormalizedToken) -> NormalizedToken:
-        providers = [p for p in self.providers if getattr(p, "name", "") in ("dexscreener", "solana")]
-        with ThreadPoolExecutor(max_workers=len(providers) or 1) as pool:
-            futures = {pool.submit(provider.enrich, token): provider for provider in providers}
-            for future in as_completed(futures):
-                provider = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    provider.health.mark_failure(str(exc))
-                    log.warning("provider_enrichment_failure provider=%s mint=%s error=%s", provider.name, token.mint, type(exc).__name__)
+    def _mark_conflicts(self, token: NormalizedToken) -> None:
         for field in ("market_cap", "price_usd", "liquidity_usd"):
             values: list[tuple[str, float]] = []
             for source, obs in token.sources.items():
@@ -99,26 +89,65 @@ class PulseEngine:
                         marker = f"{source}:{field}"
                         if marker not in token.conflicts:
                             token.conflicts.append(marker)
+
+    def enrich(
+        self,
+        token: NormalizedToken,
+        provider_names: tuple[str, ...] = ("dexscreener", "solana"),
+    ) -> NormalizedToken:
+        allowed = set(provider_names)
+        providers = [p for p in self.providers if getattr(p, "name", "") in allowed]
+        with ThreadPoolExecutor(max_workers=len(providers) or 1) as pool:
+            futures = {pool.submit(provider.enrich, token): provider for provider in providers}
+            for future in as_completed(futures):
+                provider = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    provider.health.mark_failure(str(exc))
+                    log.warning("provider_enrichment_failure provider=%s mint=%s error=%s", provider.name, token.mint, type(exc).__name__)
+        self._mark_conflicts(token)
         return token
+
+    def enrich_many(self, tokens: Iterable[NormalizedToken]) -> list[NormalizedToken]:
+        """Batch DexScreener market enrichment, then verify each mint on Solana."""
+        rows = list(tokens)
+        if not rows:
+            return rows
+
+        dex = next((p for p in self.providers if getattr(p, "name", "") == "dexscreener"), None)
+        dex_batched = False
+        if dex is not None and hasattr(dex, "enrich_many"):
+            try:
+                dex.enrich_many(rows)
+                dex_batched = True
+            except Exception as exc:
+                dex.health.mark_failure(str(exc))
+                log.warning("provider_batch_enrichment_failure provider=dexscreener error=%s", type(exc).__name__)
+
+        names = ("solana",) if dex_batched else ("dexscreener", "solana")
+        for token in rows:
+            self.enrich(token, provider_names=names)
+        return rows
 
     def evaluate(self, token: NormalizedToken, history: list[MarketWindow] | None = None) -> CandidateDecision:
         token.history = list(history or token.history)
         decision = evaluate(token, self.config)
         decision.reasoning = structured_reasoning(token, decision)
         event = "REJECTED" if decision.rejected_reason else "EVALUATED"
-        log.info("%s mint=%s score=%s classification=%s reason=%s", event, token.mint, decision.score, decision.classification, decision.rejected_reason or "none")
+        log.info("%%s mint=%%s score=%%s classification=%%s reason=%%s", event, token.mint, decision.score, decision.classification, decision.rejected_reason or "none")
         return decision
 
     def scan(self, history_loader: Callable[[str], list[MarketWindow]] | None = None) -> list[tuple[NormalizedToken, CandidateDecision]]:
         discovered = self.discover()
         discovered.sort(key=self._guideline_priority, reverse=True)
+        selected = discovered[: self.config.max_candidates]
+        self.enrich_many(selected)
         results: list[tuple[NormalizedToken, CandidateDecision]] = []
-        for token in discovered[: self.config.max_candidates]:
-            self.enrich(token)
+        for token in selected:
             history = history_loader(token.mint) if history_loader else []
             results.append((token, self.evaluate(token, history)))
         return results
 
     def health_snapshot(self) -> dict[str, dict[str, object]]:
         return {p.name: vars(p.health).copy() for p in self.providers}
-
