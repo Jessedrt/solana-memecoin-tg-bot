@@ -113,7 +113,9 @@ class DexScreenerProvider(BaseProvider):
         for row in rows:
             if not isinstance(row, dict) or str(row.get("chainId")) != "solana":
                 continue
-            if not self._token_side(row, token.mint):
+            # priceUsd, marketCap and trade direction describe the BASE token.
+            # A match only on quoteToken must not attach another token's data.
+            if str((row.get("baseToken") or {}).get("address") or "") != token.mint:
                 continue
             pair_address = str(row.get("pairAddress") or "")
             if not pair_address:
@@ -137,8 +139,7 @@ class DexScreenerProvider(BaseProvider):
         total_liquidity = sum(self._liquidity_usd(p) for p in pairs)
         active_pool_count = sum(1 for p in pairs if self._liquidity_usd(p) > 0)
 
-        created_values = [self._pair_created_at(p) for p in pairs]
-        created_values = [v for v in created_values if v]
+        created_values = [v for p in pairs if (v := self._pair_created_at(p)) is not None and v > 0]
         earliest_pair_created = min(created_values) if created_values else None
         primary_pair_created = self._pair_created_at(primary)
 

@@ -8,6 +8,8 @@ def structured_reasoning(t: NormalizedToken, d: CandidateDecision) -> dict[str, 
     positives: list[str] = []
     risks: list[str] = []
     unavailable = [name for name, state in d.source_states.items() if state != "CONFIRMED"]
+    if d.profile == "5x":
+        risks.append("RugCheck holder/insider concentration is a proxy; funding clusters are unverified.")
     if d.momentum == "ACCELERATING":
         positives.append("Buyer or buy-volume growth is accelerating across stored windows.")
     if d.liquidity_trend == "ACCELERATING":
@@ -36,7 +38,8 @@ def structured_reasoning(t: NormalizedToken, d: CandidateDecision) -> dict[str, 
         "holder_concentration": {"top10_pct": t.top10_pct, "top20_pct": t.top20_pct},
         "bundle_sniper_risk": {"bundled_pct": t.bundled_pct, "sniper_pct": t.sniper_pct},
         "executability": {str(x.amount): x.grade for x in d.executability},
-        "three_x_feasibility": "PLAUSIBLE" if d.score >= 75 and d.executability[-1].grade != "POOR" else "UNPROVEN",
+        "target_multiple": d.target_multiple,
+        "target_feasibility": "UNPROVEN",  # A ranking/quote cannot establish future returns.
         "positives": positives,
         "risks": risks,
         "invalidation": invalidation,

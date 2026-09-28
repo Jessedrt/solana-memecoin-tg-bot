@@ -21,6 +21,8 @@ class handler(BaseHTTPRequestHandler):
             "deep_dd_required": bool(bot.REQUIRE_DEEP_DD),
             "scheduler": serverless.SCAN_CRON,
             "scanner_enabled": serverless.scanner_enabled(),
+            "profile": serverless.scanner_profile(),
+            "available_profiles": ["3x", "5x"],
             "providers": serverless.provider_health(),
         }
         body = json.dumps(payload).encode("utf-8")

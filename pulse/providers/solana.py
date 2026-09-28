@@ -26,8 +26,11 @@ class SolanaProvider(BaseProvider):
 
     def enrich(self, token: NormalizedToken) -> NormalizedToken:
         account = self._rpc("getAccountInfo", [token.mint, {"encoding": "jsonParsed", "commitment": "confirmed"}], f"acct:{token.mint}")
-        info = (((account or {}).get("value") or {}).get("data") or {}).get("parsed", {}).get("info", {})
-        if not isinstance(info, dict):
+        value = (account or {}).get("value") or {}
+        parsed = (value.get("data") or {}).get("parsed") or {}
+        info = parsed.get("info")
+        if (parsed.get("type") != "mint" or not isinstance(info, dict)
+                or not {"mintAuthority", "freezeAuthority"}.issubset(info)):
             raise ValueError("Solana mint account was not parsed")
         degraded: list[str] = []
         try:

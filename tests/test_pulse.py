@@ -27,6 +27,7 @@ def safe_token() -> NormalizedToken:
     now = time.time()
     return NormalizedToken(
         mint=MINT, name="Pulse Test", symbol="PULSE", created_at=now - 20 * 60,
+        graduated=True, total_trading_fees_sol=2.0,
         price_usd=.0001, market_cap=75_000, liquidity_usd=28_000,
         volume_m5=17_000, buys_m5=127, sells_m5=40, txns_m5=167,
         price_change_m5=15, price_change_h1=35, social_score=80,
@@ -39,6 +40,7 @@ def safe_token() -> NormalizedToken:
             "pumpfun": Observation("pumpfun", now, {"market_cap": 75_000}),
             "dexscreener": Observation("dexscreener", now, {"market_cap": 75_000}),
             "solana": Observation("solana", now, {"top10_pct": 30}),
+            "tracker_eligibility": Observation("tracker_eligibility", now, {"status": "graduated", "total_trading_fees_sol": 2.0}),
         },
         history=[
             MarketWindow(now - 600, 29, 8, 2400, 500, 50, 14_000, 50, .00008, 60_000),

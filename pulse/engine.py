@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable
 
 from .config import PulseConfig
-from .evaluation import evaluate
+from .evaluation import eligibility_issue, evaluate, hard_rug_gate, profile_range_issue
 from .models import CandidateDecision, MarketWindow, NormalizedToken
 from .providers import (
     DexScreenerProvider,
@@ -15,6 +16,10 @@ from .providers import (
     SolanaProvider,
 )
 from .providers.base import BaseProvider
+from .providers.geckoterminal import GeckoTerminalProvider
+from .providers.jupiter import JupiterProvider
+from .providers.rugcheck import RugCheckProvider
+from .providers.tracker import TrackerEligibilityProvider
 from .reasoning import structured_reasoning
 
 log = logging.getLogger("pulse.engine")
@@ -26,11 +31,20 @@ class PulseEngine:
         config: PulseConfig | None = None,
         providers: Iterable[BaseProvider] | None = None,
     ) -> None:
-        self.config = config or PulseConfig()
-        self.providers = list(providers or [PumpFunProvider(), DexScreenerProvider(), GmgnProvider(), FomoProvider(), SolanaProvider()])
+        self.config = config or PulseConfig.for_profile()
+        self.deadline = time.monotonic() + 180
+        defaults = ([GeckoTerminalProvider(), DexScreenerProvider(), SolanaProvider(), RugCheckProvider(), JupiterProvider()]
+                    if self.config.profile == "5x" else
+                    [PumpFunProvider(), DexScreenerProvider(), GmgnProvider(), FomoProvider(), SolanaProvider(), RugCheckProvider()])
+        defaults.append(TrackerEligibilityProvider())
+        self.providers = list(providers if providers is not None else defaults)
+        if self.config.profile == "5x":
+            for provider in self.providers:
+                provider.retries = 0  # Bound a serverless scan under provider outages.
 
     def discover(self) -> list[NormalizedToken]:
-        discovery = [p for p in self.providers if getattr(p, "name", "") != "solana"]
+        discovery = [p for p in self.providers if p.name not in ("solana", "rugcheck", "jupiter", "tracker_eligibility")
+                     and (self.config.profile != "5x" or p.name == "geckoterminal")]
         tokens: list[NormalizedToken] = []
         with ThreadPoolExecutor(max_workers=min(4, len(discovery) or 1)) as pool:
             futures = {pool.submit(p.discover): p for p in discovery}
@@ -39,7 +53,7 @@ class PulseEngine:
                 try:
                     tokens.extend(future.result())
                 except Exception as exc:
-                    provider.health.mark_failure(str(exc))
+                    provider.health.mark_failure(type(exc).__name__)
                     log.warning("provider_failure provider=%s error=%s", provider.name, type(exc).__name__)
         return self._deduplicate(tokens)
 
@@ -104,7 +118,7 @@ class PulseEngine:
                 try:
                     future.result()
                 except Exception as exc:
-                    provider.health.mark_failure(str(exc))
+                    provider.health.mark_failure(type(exc).__name__)
                     log.warning("provider_enrichment_failure provider=%s mint=%s error=%s", provider.name, token.mint, type(exc).__name__)
         self._mark_conflicts(token)
         return token
@@ -122,16 +136,35 @@ class PulseEngine:
                 dex.enrich_many(rows)
                 dex_batched = True
             except Exception as exc:
-                dex.health.mark_failure(str(exc))
+                dex.health.mark_failure(type(exc).__name__)
                 log.warning("provider_batch_enrichment_failure provider=dexscreener error=%s", type(exc).__name__)
 
-        names = ("solana",) if dex_batched else ("dexscreener", "solana")
         for token in rows:
-            self.enrich(token, provider_names=names)
+            if self.config.profile == "5x" and time.monotonic() >= self.deadline:
+                break
+            if not dex_batched:
+                self.enrich(token, provider_names=("dexscreener",))
+            if profile_range_issue(token, self.config):
+                continue
+            if token.market_cap is None or token.market_cap < self.config.min_market_cap:
+                continue
+            self.enrich(token, provider_names=("tracker_eligibility",))
+            if eligibility_issue(token, self.config):
+                continue
+            self.enrich(token, provider_names=("solana",))
+            self.enrich(token, provider_names=("rugcheck",))
         return rows
 
     def evaluate(self, token: NormalizedToken, history: list[MarketWindow] | None = None) -> CandidateDecision:
         token.history = list(history or token.history)
+        # Quote only range/safety survivors and evaluate immediately so a
+        # later candidate's network calls cannot age this token's quotes.
+        if self.config.profile == "5x" and not profile_range_issue(token, self.config) and not eligibility_issue(token, self.config):
+            gate = hard_rug_gate(token, self.config)
+            mandatory = ("mint_authority", "freeze_authority", "rugcheck_danger", "holder_proxy", "top10_concentration")
+            if (not gate.failures and all(gate.checks.get(k) == "PASS" for k in mandatory)
+                    and time.monotonic() + 55 <= self.deadline):
+                self.enrich(token, provider_names=("jupiter",))
         decision = evaluate(token, self.config)
         decision.reasoning = structured_reasoning(token, decision)
         event = "REJECTED" if decision.rejected_reason else "EVALUATED"

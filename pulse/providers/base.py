@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from abc import ABC
@@ -57,7 +58,8 @@ class BaseProvider(ABC):
                 error = exc
                 if attempt < self.retries:
                     time.sleep(0.2 * (2 ** attempt))
-        detail = f"{type(error).__name__}: {error}"
+        # Requests exceptions can contain credential-bearing RPC URLs.
+        detail = type(error).__name__
         self.health.mark_failure(detail)
         raise ProviderError(f"{self.name}: {detail}") from error
 
@@ -70,8 +72,9 @@ class BaseProvider(ABC):
 
 def as_float(value: Any) -> float | None:
     try:
-        return float(value) if value not in (None, "") else None
-    except (TypeError, ValueError):
+        number = float(value) if value not in (None, "") and not isinstance(value, bool) else None
+        return number if number is not None and math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

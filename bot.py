@@ -1435,6 +1435,24 @@ def collect_candidates() -> list[Token]:
 
     return list(found.values())
 
+def graduated_fee_gate(token: Token) -> bool:
+    """Legacy entry points must honor the same universal Pulse eligibility."""
+    from pulse.config import PulseConfig
+    from pulse.evaluation import eligibility_issue
+    from pulse.models import NormalizedToken
+    from pulse.providers.dexscreener import DexScreenerProvider
+    from pulse.providers.tracker import TrackerEligibilityProvider
+
+    candidate = NormalizedToken(token.mint)
+    try:
+        DexScreenerProvider().enrich(candidate)
+        TrackerEligibilityProvider().enrich(candidate)
+        return eligibility_issue(candidate, PulseConfig.for_profile()) is None
+    except Exception as exc:
+        log.warning("graduation_fee_check_failed mint=%s error=%s", token.mint, type(exc).__name__)
+        return False
+
+
 def scan_once(tg: Telegram, state: dict[str, float]) -> dict[str, int]:
     stats = {"seen": 0, "filtered": 0, "scored": 0, "alerted": 0}
     tokens = collect_candidates()
@@ -1459,6 +1477,8 @@ def scan_once(tg: Telegram, state: dict[str, float]) -> dict[str, int]:
         if t.score < MIN_SCORE:
             continue
         if t.source == "rugcheck-new" and t.usd_mcap < MIN_MCAP_USD and t.score < 70:
+            continue
+        if not graduated_fee_gate(t):
             continue
         tg.send(format_alert(t), image=t.image or None)
         state[t.mint] = now
