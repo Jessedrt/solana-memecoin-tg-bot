@@ -106,6 +106,7 @@ class Token:
     freeze_authority_active: bool = False
     top10_pct: float = 0.0
     largest_holder_pct: float = 0.0
+    holder_count: int = 0
     insider_pct: float = 0.0
     lp_locked_pct: float | None = None
     structural_risks: list[str] = field(default_factory=list)
@@ -709,6 +710,10 @@ def rugcheck_full_enrich(token: Token) -> bool:
 
     token.rug_full_checked = True
     token.rugged = bool(data.get("rugged"))
+    try:
+        token.holder_count = int(data.get("totalHolders") or 0)
+    except (TypeError, ValueError):
+        token.holder_count = 0
 
     if data.get("score_normalised") is not None:
         try:

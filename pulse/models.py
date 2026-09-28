@@ -83,6 +83,10 @@ class NormalizedToken:
     migrated: bool | None = None
     graduated: bool | None = None
     total_trading_fees_sol: float | None = None
+    launchpad: str | None = None
+    dex_id: str | None = None
+    has_socials: bool | None = None
+    discovery_lane: str | None = None
     creator: str | None = None
     social_score: float | None = None
     attention_acceleration: float | None = None
@@ -96,6 +100,7 @@ class NormalizedToken:
     related_wallet_pct: float | None = None
     sniper_pct: float | None = None
     bundled_pct: float | None = None
+    holder_count: int | None = None
     independent_holders: int | None = None
     fresh_wallet_pct: float | None = None
     wallet_cluster_score: float | None = None
@@ -159,6 +164,9 @@ class CandidateDecision:
     rejected_reason: str | None = None
     profile: str = "3x"
     target_multiple: int = 3
+    raw_score: int = 0
+    available_evidence_max: int = 0
+    evidence_confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

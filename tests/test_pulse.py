@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import requests
 
 from pulse.config import PulseConfig
+from pulse.discovery import assign_discovery_lane
 from pulse.engine import PulseEngine
 from pulse.evaluation import (
     demand_quality,
@@ -29,13 +30,14 @@ def safe_token() -> NormalizedToken:
         mint=MINT, name="Pulse Test", symbol="PULSE", created_at=now - 20 * 60,
         graduated=True, total_trading_fees_sol=2.0,
         price_usd=.0001, market_cap=75_000, liquidity_usd=28_000,
-        volume_m5=17_000, buys_m5=127, sells_m5=40, txns_m5=167,
+        volume_m5=17_000, volume_h1=20_000, buys_m5=127, sells_m5=40, txns_m5=167,
         price_change_m5=15, price_change_h1=35, social_score=80,
         mint_authority_active=False, freeze_authority_active=False, rugged=False,
         top10_pct=30, top20_pct=42, largest_holder_pct=8, creator_pct=2,
-        related_wallet_pct=5, sniper_pct=3, bundled_pct=2,
+        related_wallet_pct=5, sniper_pct=3, bundled_pct=2, holder_count=500,
         wallet_cluster_score=.1, wash_trading_score=.1, creator_dumping=False,
         creator_risk="LOW", pair_url="https://dexscreener.com/solana/test",
+        migrated=False, launchpad="PumpFun", has_socials=True,
         sources={
             "pumpfun": Observation("pumpfun", now, {"market_cap": 75_000}),
             "dexscreener": Observation("dexscreener", now, {"market_cap": 75_000}),
@@ -108,8 +110,110 @@ class EvaluationTests(unittest.TestCase):
 
     def test_candidate_score_transparent(self):
         decision = evaluate(safe_token(), self.cfg)
-        self.assertEqual(decision.score, sum(decision.components.values()))
+        self.assertEqual(decision.raw_score, sum(decision.components.values()))
         self.assertGreaterEqual(decision.score, 85)
+        self.assertGreaterEqual(decision.available_evidence_max, 90)
+
+    def test_optional_provider_gaps_do_not_fake_bad_score(self):
+        token = safe_token()
+        token.social_score = None
+        token.creator_pct = None
+        token.related_wallet_pct = None
+        token.sniper_pct = None
+        token.bundled_pct = None
+        token.wallet_cluster_score = None
+        token.wash_trading_score = None
+        token.creator_dumping = None
+        token.creator_risk = "UNKNOWN"
+        token.history = [
+            MarketWindow(time.time() - 600, transactions=55, liquidity=18_000, price=.00008, market_cap=62_000),
+            MarketWindow(time.time() - 300, transactions=90, liquidity=23_000, price=.00009, market_cap=68_000),
+            MarketWindow(time.time(), transactions=167, liquidity=28_000, price=.0001, market_cap=75_000),
+        ]
+        decision = evaluate(token, self.cfg)
+        self.assertGreaterEqual(decision.score, self.cfg.alert_min_score)
+        self.assertLessEqual(decision.score, 74)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+        self.assertLess(decision.evidence_confidence * 100, self.cfg.min_alert_evidence_pct)
+
+    def test_alert_requires_market_cap_inside_configured_range(self):
+        token = safe_token()
+        token.market_cap = self.cfg.max_market_cap + 1
+        token.sources["dexscreener"].fields["market_cap"] = token.market_cap
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_alert_requires_at_least_200_holders(self):
+        token = safe_token()
+        token.holder_count = 199
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_unknown_holder_count_cannot_alert(self):
+        token = safe_token()
+        token.holder_count = None
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_200_holders_meets_holder_gate(self):
+        token = safe_token()
+        token.holder_count = 200
+        decision = evaluate(token, self.cfg)
+        self.assertTrue(decision.alert)
+
+    def test_absolute_100k_alert_cap_cannot_be_overridden_higher(self):
+        token = safe_token()
+        token.market_cap = 100_001
+        token.sources["dexscreener"].fields["market_cap"] = token.market_cap
+        cfg = PulseConfig(max_market_cap=500_000)
+        decision = evaluate(token, cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_declining_momentum_cannot_alert(self):
+        token = safe_token()
+        now = time.time()
+        token.history = [
+            MarketWindow(now - 600, 120, 20, 12000, 1500, 180, 28_000, 170, .0001, 75_000),
+            MarketWindow(now - 300, 90, 18, 9000, 1400, 140, 27_000, 150, .000095, 72_000),
+            MarketWindow(now, 60, 16, 6000, 1300, 100, 26_000, 130, .00009, 68_000),
+        ]
+        decision = evaluate(token, self.cfg)
+        self.assertEqual(decision.momentum, "DECLINING")
+        self.assertFalse(decision.alert)
+
+    def test_extended_move_cannot_alert(self):
+        token = safe_token()
+        token.price_change_m5 = self.cfg.max_alert_price_change_m5 + 1
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+
+    def test_thin_market_only_evidence_cannot_alert(self):
+        now = time.time()
+        token = NormalizedToken(
+            mint=MINT,
+            created_at=now - 20 * 60,
+            price_usd=.0001,
+            market_cap=75_000,
+            liquidity_usd=28_000,
+            buys_m5=25,
+            sells_m5=10,
+            txns_m5=35,
+            price_change_m5=8,
+            price_change_h1=25,
+            sources={"dexscreener": Observation("dexscreener", now, {})},
+            history=[
+                MarketWindow(now - 300, transactions=20, liquidity=20_000),
+                MarketWindow(now, transactions=35, liquidity=28_000),
+            ],
+        )
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertLess(decision.available_evidence_max, 50)
 
     def test_safety_override(self):
         token = safe_token(); token.rugged = True
@@ -138,8 +242,73 @@ class EvaluationTests(unittest.TestCase):
         decision.reasoning = structured_reasoning(token, decision)
         alert = format_alert(token, decision)
         self.assertIn("ranking signal", alert)
+        self.assertIn("Chart", alert)
+        self.assertIn("GMGN", alert)
+        self.assertIn("Solscan", alert)
+        self.assertIn("Holders 500", alert)
+        self.assertLess(len(alert.splitlines()), 15)
         self.assertNotIn("% chance", alert)
         self.assertNotIn("{\"", alert)
+
+
+class DiscoveryLaneTests(unittest.TestCase):
+    def test_confirmed_graduate_lane(self):
+        token = safe_token()
+        self.assertEqual(assign_discovery_lane(token), "MIGRATED")
+
+    def test_new_token_requires_socials(self):
+        token = safe_token()
+        token.graduated = False
+        token.has_socials = False
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_new_token_rejects_dev_over_three_percent(self):
+        token = safe_token()
+        token.graduated = False
+        token.creator_pct = 3.1
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_new_token_rejects_snipers_over_five_percent(self):
+        token = safe_token()
+        token.graduated = False
+        token.sniper_pct = 5.1
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_about_to_graduate_preset(self):
+        token = safe_token()
+        token.graduated = False
+        token.market_cap = 25_000
+        token.holder_count = 200
+        token.sniper_pct = 10
+        token.has_socials = False
+        token.volume_h1 = 16_000
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_about_to_graduate_never_allowed_without_socials(self):
+        token = safe_token()
+        token.graduated = False
+        token.market_cap = 25_000
+        token.holder_count = 200
+        token.sniper_pct = 10
+        token.has_socials = False
+        token.volume_h1 = 16_000
+        self.assertIsNone(assign_discovery_lane(token))
+
+    def test_migrated_preset(self):
+        token = safe_token()
+        token.market_cap = 50_000
+        token.migrated = True
+        self.assertEqual(assign_discovery_lane(token), "MIGRATED")
+
+    def test_token_without_a_lane_cannot_alert(self):
+        token = safe_token()
+        token.graduated = False
+        token.has_socials = False
+        token.migrated = False
+        token.market_cap = 75_000
+        decision = evaluate(token, PulseConfig())
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "REJECTED")
 
 
 class DexScreenerProviderTests(unittest.TestCase):

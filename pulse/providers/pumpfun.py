@@ -50,15 +50,19 @@ class PumpFunProvider(BaseProvider):
         if virtual_sol and virtual_sol > 1_000_000:
             virtual_sol /= 1_000_000_000
         progress = min(100.0, virtual_sol / 85 * 100) if virtual_sol is not None else None
+        holder_count = as_int(raw.get("holder_count") or raw.get("holders_count") or raw.get("total_holders"))
+        has_socials = bool(raw.get("twitter") or raw.get("telegram") or raw.get("website"))
         fields = {
             "market_cap": market_cap, "created_at": created, "bonding_progress": progress,
             "migrated": bool(raw.get("complete")), "creator": raw.get("creator"),
-            "replies": as_int(raw.get("reply_count")),
+            "replies": as_int(raw.get("reply_count")), "holder_count": holder_count,
+            "has_socials": has_socials, "launchpad": "PumpFun",
         }
         return NormalizedToken(
             mint=mint, name=str(raw.get("name") or "?"), symbol=str(raw.get("symbol") or "?"),
             created_at=created, market_cap=market_cap, bonding_progress=progress,
-            migrated=bool(raw.get("complete")), creator=str(raw.get("creator") or "") or None,
+            migrated=bool(raw.get("complete")), launchpad="PumpFun", has_socials=has_socials,
+            creator=str(raw.get("creator") or "") or None, holder_count=holder_count,
             image_url=str(raw.get("image_uri") or ""),
             sources={self.name: Observation(self.name, time.time(), fields, mint)},
         )

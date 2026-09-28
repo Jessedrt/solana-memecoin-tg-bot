@@ -80,8 +80,8 @@ def as_float(value: Any) -> float | None:
 
 def as_int(value: Any) -> int | None:
     try:
-        return int(value) if value not in (None, "") else None
-    except (TypeError, ValueError):
+        return int(value) if value not in (None, "") and not isinstance(value, bool) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

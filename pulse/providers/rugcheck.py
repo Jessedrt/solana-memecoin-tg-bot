@@ -4,7 +4,7 @@ import time
 
 from pulse.models import NormalizedToken, Observation
 
-from .base import BaseProvider, as_float
+from .base import BaseProvider, as_float, as_int
 
 
 class RugCheckProvider(BaseProvider):
@@ -23,6 +23,9 @@ class RugCheckProvider(BaseProvider):
         if any(not isinstance(r, dict) or not isinstance(r.get("level"), str) for r in risks):
             raise ValueError("Incomplete RugCheck risk levels")
         token.rugcheck_danger = any(r["level"].lower() == "danger" for r in risks)
+        count = as_int(data.get("totalHolders"))
+        if count is not None and count >= 0:
+            token.holder_count = count
         if isinstance(data.get("rugged"), bool):
             token.rugged = token.rugged is True or data["rugged"]
         # RPC is authoritative for revocation. RugCheck can add a failure,

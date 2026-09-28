@@ -158,6 +158,8 @@ class DexScreenerProvider(BaseProvider):
         )
 
         change = primary.get("priceChange") or {}
+        info = primary.get("info") or {}
+        has_socials = bool((info.get("socials") or []) or (info.get("websites") or [])) if isinstance(info, dict) else False
         values = {
             "name": str(side.get("name") or token.name),
             "symbol": str(side.get("symbol") or token.symbol),
@@ -184,6 +186,7 @@ class DexScreenerProvider(BaseProvider):
             "pair_url": str(primary.get("url") or ""),
             "pair_address": str(primary.get("pairAddress") or ""),
             "dex_id": str(primary.get("dexId") or ""),
+            "has_socials": has_socials,
             "primary_pair_created_at": primary_pair_created,
             "active_boosts": as_int((primary.get("boosts") or {}).get("active")),
         }
@@ -224,6 +227,9 @@ class DexScreenerProvider(BaseProvider):
                 setattr(token, key, value)
 
         token.txns_m5 = aggregate_buys_m5 + aggregate_sells_m5
+        token.dex_id = str(primary.get("dexId") or "") or token.dex_id
+        if has_socials:
+            token.has_socials = True
 
         existing = token.sources.get(self.name)
         merged = dict(existing.fields) if existing else {}

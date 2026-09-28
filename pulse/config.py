@@ -27,7 +27,8 @@ class PulseConfig:
     max_age_minutes: float = field(default_factory=lambda: _float("PULSE_MAX_AGE_MINUTES", 360))
     min_market_cap: float = field(default_factory=lambda: max(30_000, _float("PULSE_MIN_MCAP_USD", 30_000)))
     min_trading_fees_sol: float = 2.0
-    max_market_cap: float = field(default_factory=lambda: _float("PULSE_MAX_MCAP_USD", 500_000))
+    min_holders: int = field(default_factory=lambda: _int("PULSE_MIN_HOLDERS", 200))
+    max_market_cap: float = field(default_factory=lambda: _float("PULSE_MAX_MCAP_USD", 100_000))
     preferred_liquidity: float = field(default_factory=lambda: _float("PULSE_PREFERRED_LIQUIDITY_USD", 8_000))
     critical_liquidity: float = field(default_factory=lambda: _float("PULSE_CRITICAL_LIQUIDITY_USD", 2_000))
     max_creator_pct: float = field(default_factory=lambda: _float("PULSE_MAX_CREATOR_PCT", 20))
@@ -39,6 +40,9 @@ class PulseConfig:
     stale_seconds: int = field(default_factory=lambda: _int("PULSE_STALE_SECONDS", 300))
     conflict_ratio: float = field(default_factory=lambda: _float("PULSE_CONFLICT_RATIO", 0.25))
     alert_min_score: int = field(default_factory=lambda: _int("PULSE_ALERT_MIN_SCORE", 65))
+    min_alert_evidence_pct: float = field(default_factory=lambda: _float("PULSE_MIN_ALERT_EVIDENCE_PCT", 65))
+    max_alert_price_change_m5: float = field(default_factory=lambda: _float("PULSE_MAX_ALERT_PRICE_CHANGE_M5", 60))
+    max_alert_price_change_h1: float = field(default_factory=lambda: _float("PULSE_MAX_ALERT_PRICE_CHANGE_H1", 150))
     strong_watch_score: int = field(default_factory=lambda: _int("PULSE_STRONG_WATCH_SCORE", 75))
     high_conviction_score: int = field(default_factory=lambda: _int("PULSE_HIGH_CONVICTION_SCORE", 85))
     re_alert_score_delta: int = field(default_factory=lambda: _int("PULSE_REALERT_SCORE_DELTA", 10))
@@ -62,7 +66,7 @@ class PulseConfig:
             return config
         return replace(config, profile="5x", target_multiple=5,
                        min_age_minutes=15, max_age_minutes=720,
-                       min_market_cap=max(30_000, config.min_market_cap), max_market_cap=250_000,
+                       min_market_cap=max(30_000, config.min_market_cap), max_market_cap=min(config.max_market_cap, 100_000),
                        critical_liquidity=8_000, preferred_liquidity=8_000,
                        max_liquidity=80_000, max_candidates=min(config.max_candidates, 4))
 

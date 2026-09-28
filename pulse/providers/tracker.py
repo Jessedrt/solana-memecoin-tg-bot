@@ -5,7 +5,7 @@ from typing import Any
 
 from pulse.models import NormalizedToken, Observation
 
-from .base import BaseProvider, as_float
+from .base import BaseProvider, as_float, as_int
 
 
 class TrackerEligibilityProvider(BaseProvider):
@@ -44,6 +44,18 @@ class TrackerEligibilityProvider(BaseProvider):
         row = rows[0]
         status = row.get("status")
         token.graduated = status == "graduated" if status in ("graduated", "graduating", "default") else None
+        token.migrated = token.graduated
+        count = as_int(row.get("holders"))
+        if count is not None and count >= 0:
+            token.holder_count = count
+        for key, attr in (("dev", "creator_pct"), ("insiders", "related_wallet_pct"), ("snipers", "sniper_pct")):
+            pct = as_float(row.get(key))
+            if pct is not None and 0 <= pct <= 100:
+                setattr(token, attr, pct)
+        bundled = row.get("bundlers")
+        pct = as_float(bundled.get("percentage")) if isinstance(bundled, dict) else None
+        if pct is not None and 0 <= pct <= 100:
+            token.bundled_pct = pct
         fees = row.get("fees")
         total = as_float(fees.get("totalTrading")) if isinstance(fees, dict) else None
         token.total_trading_fees_sol = total if total is not None and total >= 0 else None
