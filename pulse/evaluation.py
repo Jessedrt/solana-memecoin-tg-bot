@@ -315,18 +315,35 @@ def evaluate(t: NormalizedToken, cfg: PulseConfig) -> CandidateDecision:
     if t.conflicts:
         score = min(score, 74)
 
+    evidence_pct = evidence_confidence * 100
+    market_cap_ok = t.market_cap is not None and cfg.min_market_cap <= t.market_cap <= cfg.max_market_cap
+    age_ok = t.age_minutes is not None and cfg.min_age_minutes <= t.age_minutes <= cfg.max_age_minutes
+    move_ok = (
+        (t.price_change_m5 is None or t.price_change_m5 <= cfg.max_alert_price_change_m5)
+        and (t.price_change_h1 is None or t.price_change_h1 <= cfg.max_alert_price_change_h1)
+    )
+    alert_eligible = (
+        not rejected
+        and score >= cfg.alert_min_score
+        and evidence_pct >= cfg.min_alert_evidence_pct
+        and market_cap_ok
+        and age_ok
+        and move_ok
+        and momentum != "DECLINING"
+    )
+
     classification = (
         "REJECTED" if rejected
-        else "HIGH_CONVICTION" if score >= cfg.high_conviction_score
-        else "STRONG_WATCH" if score >= cfg.strong_watch_score
-        else "WATCH" if score >= cfg.alert_min_score
+        else "HIGH_CONVICTION" if alert_eligible and score >= cfg.high_conviction_score
+        else "STRONG_WATCH" if alert_eligible and score >= cfg.strong_watch_score
+        else "WATCH" if alert_eligible
         else "NO_ALERT"
     )
     decision = CandidateDecision(
         mint=t.mint,
         score=score,
         classification=classification,
-        alert=not rejected and score >= cfg.alert_min_score and available_max >= 50,
+        alert=alert_eligible,
         safety=safety,
         components=components,
         demand_quality=quality,
