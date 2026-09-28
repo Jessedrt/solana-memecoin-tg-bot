@@ -106,8 +106,55 @@ class EvaluationTests(unittest.TestCase):
 
     def test_candidate_score_transparent(self):
         decision = evaluate(safe_token(), self.cfg)
-        self.assertEqual(decision.score, sum(decision.components.values()))
+        self.assertEqual(decision.raw_score, sum(decision.components.values()))
         self.assertGreaterEqual(decision.score, 85)
+        self.assertGreaterEqual(decision.available_evidence_max, 90)
+
+    def test_optional_provider_gaps_do_not_force_clean_candidate_into_30s(self):
+        token = safe_token()
+        token.social_score = None
+        token.creator_pct = None
+        token.related_wallet_pct = None
+        token.sniper_pct = None
+        token.bundled_pct = None
+        token.wallet_cluster_score = None
+        token.wash_trading_score = None
+        token.creator_dumping = None
+        token.creator_risk = "UNKNOWN"
+        token.history = [
+            MarketWindow(time.time() - 600, transactions=55, liquidity=18_000, price=.00008, market_cap=62_000),
+            MarketWindow(time.time() - 300, transactions=90, liquidity=23_000, price=.00009, market_cap=68_000),
+            MarketWindow(time.time(), transactions=167, liquidity=28_000, price=.0001, market_cap=75_000),
+        ]
+        decision = evaluate(token, self.cfg)
+        self.assertTrue(decision.alert)
+        self.assertEqual(decision.classification, "WATCH")
+        self.assertGreaterEqual(decision.score, self.cfg.alert_min_score)
+        self.assertLessEqual(decision.score, 74)
+        self.assertGreaterEqual(decision.available_evidence_max, 50)
+
+    def test_thin_market_only_evidence_cannot_alert(self):
+        now = time.time()
+        token = NormalizedToken(
+            mint=MINT,
+            created_at=now - 20 * 60,
+            price_usd=.0001,
+            market_cap=75_000,
+            liquidity_usd=28_000,
+            buys_m5=25,
+            sells_m5=10,
+            txns_m5=35,
+            price_change_m5=8,
+            price_change_h1=25,
+            sources={"dexscreener": Observation("dexscreener", now, {})},
+            history=[
+                MarketWindow(now - 300, transactions=20, liquidity=20_000),
+                MarketWindow(now, transactions=35, liquidity=28_000),
+            ],
+        )
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertLess(decision.available_evidence_max, 50)
 
     def test_safety_override(self):
         token = safe_token(); token.rugged = True
@@ -136,6 +183,7 @@ class EvaluationTests(unittest.TestCase):
         decision.reasoning = structured_reasoning(token, decision)
         alert = format_alert(token, decision)
         self.assertIn("ranking signal", alert)
+        self.assertIn("Evidence coverage:", alert)
         self.assertNotIn("% chance", alert)
         self.assertNotIn("{\"", alert)
 
