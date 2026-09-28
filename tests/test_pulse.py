@@ -110,7 +110,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertGreaterEqual(decision.score, 85)
         self.assertGreaterEqual(decision.available_evidence_max, 90)
 
-    def test_optional_provider_gaps_do_not_force_clean_candidate_into_30s(self):
+    def test_optional_provider_gaps_do_not_fake_bad_score(self):
         token = safe_token()
         token.social_score = None
         token.creator_pct = None
@@ -127,11 +127,36 @@ class EvaluationTests(unittest.TestCase):
             MarketWindow(time.time(), transactions=167, liquidity=28_000, price=.0001, market_cap=75_000),
         ]
         decision = evaluate(token, self.cfg)
-        self.assertTrue(decision.alert)
-        self.assertEqual(decision.classification, "WATCH")
         self.assertGreaterEqual(decision.score, self.cfg.alert_min_score)
         self.assertLessEqual(decision.score, 74)
-        self.assertGreaterEqual(decision.available_evidence_max, 50)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+        self.assertLess(decision.evidence_confidence * 100, self.cfg.min_alert_evidence_pct)
+
+    def test_alert_requires_market_cap_inside_configured_range(self):
+        token = safe_token()
+        token.market_cap = self.cfg.max_market_cap + 1
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
+        self.assertEqual(decision.classification, "NO_ALERT")
+
+    def test_declining_momentum_cannot_alert(self):
+        token = safe_token()
+        now = time.time()
+        token.history = [
+            MarketWindow(now - 600, 120, 20, 12000, 1500, 180, 28_000, 170, .0001, 75_000),
+            MarketWindow(now - 300, 90, 18, 9000, 1400, 140, 27_000, 150, .000095, 72_000),
+            MarketWindow(now, 60, 16, 6000, 1300, 100, 26_000, 130, .00009, 68_000),
+        ]
+        decision = evaluate(token, self.cfg)
+        self.assertEqual(decision.momentum, "DECLINING")
+        self.assertFalse(decision.alert)
+
+    def test_extended_move_cannot_alert(self):
+        token = safe_token()
+        token.price_change_m5 = self.cfg.max_alert_price_change_m5 + 1
+        decision = evaluate(token, self.cfg)
+        self.assertFalse(decision.alert)
 
     def test_thin_market_only_evidence_cannot_alert(self):
         now = time.time()
@@ -183,7 +208,10 @@ class EvaluationTests(unittest.TestCase):
         decision.reasoning = structured_reasoning(token, decision)
         alert = format_alert(token, decision)
         self.assertIn("ranking signal", alert)
-        self.assertIn("Evidence coverage:", alert)
+        self.assertIn("Chart", alert)
+        self.assertIn("GMGN", alert)
+        self.assertIn("Solscan", alert)
+        self.assertLess(len(alert.splitlines()), 15)
         self.assertNotIn("% chance", alert)
         self.assertNotIn("{\"", alert)
 
