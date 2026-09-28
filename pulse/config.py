@@ -23,7 +23,7 @@ class PulseConfig:
     min_age_minutes: float = field(default_factory=lambda: _float("PULSE_MIN_AGE_MINUTES", 5))
     max_age_minutes: float = field(default_factory=lambda: _float("PULSE_MAX_AGE_MINUTES", 360))
     min_market_cap: float = field(default_factory=lambda: _float("PULSE_MIN_MCAP_USD", 20_000))
-    max_market_cap: float = field(default_factory=lambda: _float("PULSE_MAX_MCAP_USD", 500_000))
+    max_market_cap: float = field(default_factory=lambda: _float("PULSE_MAX_MCAP_USD", 100_000))
     preferred_liquidity: float = field(default_factory=lambda: _float("PULSE_PREFERRED_LIQUIDITY_USD", 8_000))
     critical_liquidity: float = field(default_factory=lambda: _float("PULSE_CRITICAL_LIQUIDITY_USD", 2_000))
     max_creator_pct: float = field(default_factory=lambda: _float("PULSE_MAX_CREATOR_PCT", 20))
