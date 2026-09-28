@@ -18,6 +18,7 @@ from pulse.evaluation import (
 from pulse.formatting import format_alert
 from pulse.models import MarketWindow, NormalizedToken, Observation, SafetyStatus
 from pulse.providers.base import BaseProvider, ProviderError
+from pulse.providers.dexscreener import DexScreenerProvider
 
 MINT = "11111111111111111111111111111111"
 
@@ -137,6 +138,84 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("ranking signal", alert)
         self.assertNotIn("% chance", alert)
         self.assertNotIn("{\"", alert)
+
+
+class DexScreenerProviderTests(unittest.TestCase):
+    def test_discovery_merges_profiles_and_boost_attention(self):
+        provider = DexScreenerProvider()
+        provider._request_json = Mock(side_effect=[
+            [{"chainId": "solana", "tokenAddress": MINT}],
+            [{"chainId": "solana", "tokenAddress": MINT, "amount": 10}],
+            [{"chainId": "solana", "tokenAddress": MINT, "totalAmount": 25}],
+        ])
+
+        rows = provider.discover()
+
+        self.assertEqual(len(rows), 1)
+        evidence = rows[0].sources["dexscreener"].fields
+        self.assertEqual(
+            evidence["attention_sources"],
+            ["profile", "boost_latest", "boost_top"],
+        )
+        self.assertTrue(evidence["attention"])
+
+    def test_batch_enrichment_uses_primary_pool_and_aggregates_activity(self):
+        now = time.time()
+        token = NormalizedToken(MINT, created_at=now - 20 * 60)
+        provider = DexScreenerProvider()
+        provider._request_json = Mock(return_value=[
+            {
+                "chainId": "solana",
+                "pairAddress": "LOW",
+                "dexId": "pumpswap",
+                "url": "https://dexscreener.com/solana/low",
+                "baseToken": {"address": MINT, "name": "Pulse", "symbol": "PLS"},
+                "quoteToken": {"address": "So11111111111111111111111111111111111111112"},
+                "pairCreatedAt": int((now - 60) * 1000),
+                "priceUsd": "0.00010",
+                "marketCap": 100000,
+                "fdv": 100000,
+                "liquidity": {"usd": 5000},
+                "volume": {"m5": 500, "h1": 2000, "h6": 6000, "h24": 12000},
+                "txns": {"m5": {"buys": 5, "sells": 2}},
+                "priceChange": {"m5": 2, "h1": 8},
+                "boosts": {"active": 1},
+            },
+            {
+                "chainId": "solana",
+                "pairAddress": "HIGH",
+                "dexId": "raydium",
+                "url": "https://dexscreener.com/solana/high",
+                "baseToken": {"address": MINT, "name": "Pulse", "symbol": "PLS"},
+                "quoteToken": {"address": "So11111111111111111111111111111111111111112"},
+                "pairCreatedAt": int((now - 120) * 1000),
+                "priceUsd": "0.00011",
+                "marketCap": 110000,
+                "fdv": 110000,
+                "liquidity": {"usd": 20000},
+                "volume": {"m5": 1500, "h1": 5000, "h6": 14000, "h24": 30000},
+                "txns": {"m5": {"buys": 15, "sells": 5}},
+                "priceChange": {"m5": 4, "h1": 12},
+                "boosts": {"active": 0},
+            },
+        ])
+
+        provider.enrich_many([token])
+
+        self.assertEqual(token.liquidity_usd, 20000)
+        self.assertEqual(token.volume_m5, 2000)
+        self.assertEqual(token.volume_h1, 7000)
+        self.assertEqual(token.buys_m5, 20)
+        self.assertEqual(token.sells_m5, 7)
+        self.assertEqual(token.txns_m5, 27)
+        self.assertEqual(token.pair_url, "https://dexscreener.com/solana/high")
+        self.assertLessEqual(token.created_at, now - 20 * 60 + 1)
+        evidence = token.sources["dexscreener"].fields
+        self.assertEqual(evidence["dex_id"], "raydium")
+        self.assertEqual(evidence["pool_count"], 2)
+        self.assertEqual(evidence["active_pool_count"], 2)
+        self.assertEqual(evidence["total_liquidity_usd"], 25000)
+
 
 
 class FakeProvider:
